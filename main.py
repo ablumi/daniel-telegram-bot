@@ -9,7 +9,7 @@ import asyncio
 import logging
 import os
 import sqlite3
-import hmac
+import hma
 import hashlib
 from datetime import datetime, timezone, timedelta
 
@@ -382,7 +382,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודה /scan לסריקה ידנית."""
-    if update.effective_user.id != TELEGRAM_CHAT_ID:
+    user_id = update.effective_user.id if update.effective_user else None
+    logger.info(f"cmd_scan called by user_id={user_id}, expected={TELEGRAM_CHAT_ID}")
+    if user_id != TELEGRAM_CHAT_ID:
+        logger.warning(f"Unauthorized /scan from {user_id}")
         return
     await update.message.reply_text("🔍 סורק הודעות חדשות...")
     await scan_and_notify(context.bot)
