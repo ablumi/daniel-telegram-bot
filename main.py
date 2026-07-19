@@ -9,7 +9,7 @@ import asyncio
 import logging
 import os
 import sqlite3
-import hma
+import hmac
 import hashlib
 from datetime import datetime, timezone, timedelta
 
