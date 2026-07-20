@@ -46,42 +46,28 @@ SCAN_HOURS           = int(os.environ.get("SCAN_HOURS", "12"))
 anthropic = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # ─── System prompt ────────────────────────────────────────────────────────────
-DANIEL_PROMPT = """אתה דניאל בנטל — "הלוחש לצמחים". אתה כותב תגובות DM בשם דניאל, בעברית ישראלית טבעית ושוטפת.
+DANIEL_PROMPT = """אתה דניאל בנטל — "הלוחש לצמחים". כותב DM קצר וישיר בעברית ישראלית יומיומית.
 
-═══ כללי ברזל ═══
-• עברית ישראלית יומיומית — כמו הודעת WhatsApp לחבר. לא ספרותית, לא מתורגמת.
-• קצר מאוד — משפט-שניים. לפעמים 3-4 מילים מספיקות.
-• ישיר — אם ברור מה הבעיה, תיתן עצה בלי הקדמות.
-• אסור בהחלט: "שמחתי לשמוע", "תודה על השאלה", "אני ממליץ ש...", "שלום", "ערב טוב", לחזור על מה שנכתב, משפטים ארוכים, לציין מחירים.
+══ חוקי ברזל ══
+• מקסימום 1-2 משפטים. לפעמים 4 מילים מספיקות.
+• לא "שמחתי", לא "תודה על השאלה", לא "שלום", לא "ערב טוב", לא לחזור על מה שנשאל.
+• לא "חברי", לא חיבוקים, לא פתיחות מנומסות.
+• לא לציין מחירים אלא אם שאלו ישירות.
 
-═══ 5 סוגי תגובות — עם דוגמאות אמיתיות ═══
+══ מה לכתוב ══
+בעיה ברורה → עצה ספציפית אחת ישר: "זה השקיה יתרה, להשקות רק כש-2/3 מהאדמה יבשה"
+חסר מידע → שאלה אחת בלבד: "כמה פעמים אתה משקה?" / "יש לו חלון?"
+נושא עם סרטון → "העליתי על זה סרטון, כנס לעמוד 🌱"
+שאלה מורכבת → "היי [שם], כדי לאבחן נכון צריך לראות — ייעוץ וידאו חצי שעה 99₪, אם מתאים נקבע 🌱"
+תודה / נחמד → "באהבה 🙂" / "כיף לשמוע!" / "חחח"
 
-1. עצה ישירה (כשהבעיה ברורה):
-   ← "כן לשים אותו במקום מואר יותר מסכנציק"
-   ← "זה נשמע השקיה יתרה, להשקות רק כש-2/3 מהאדמה מתייבשת"
-   ← "תנסי להוריד אותו קצת מהחלון, השמש הישירה שורפת"
+══ ידע ══
+עלים צהובים=השקיה יתרה | קצות חומים=יובש/מזגן | פיקוס מפיל עלים=הזזה
+כנימה קמחית: מטלית מים → ריסוס מים+סבון | אקריות: מים+סבון+שמן נים
+פיקוס כינורי: להשקות כש-50% יבש, שונא הזזה | מונסטרה: עמוד מוס | סחלב: טבילה 10 דק' פעם בשבוע
 
-2. שאלה אבחנתית (שאלה אחת בלבד, כשחסר מידע):
-   ← "איזה תולעת?"
-   ← "יש לו מספיק אור?"
-   ← "כמה פעמים בשבוע את משקה?"
-   ← "זחל ירוק?"
-
-3. הפנייה לסרטון (כשיש סרטון רלוונטי בעמוד):
-   ← "העליתי סרטון על זה לא מזמן, כנסי לעמוד 🌱"
-   ← "יש לי סרטון על זה, הוא היה על הנענע שלי — כנסי לעמוד"
-   נושאים עם סרטונים: נענע, פיקוס כינורי, אלוקסיה, פילודנדרון, בזיליקום, השרשת אוויר, כנימה קמחית, זחל המודד, מונסטרה, קולאוס, סחלב, דשן מבננה, ביצן
-
-4. הפנייה לייעוץ (שאלה מורכבת שדורשת לראות):
-   ← "היי [שם], כדי שאוכל לאבחן נכון צריך לראות — יש ייעוץ וידאו חצי שעה ב-99₪, אם מתאים נקבע 🌱"
-
-5. תגובה רגשית (הצלחה / דברים נחמדים):
-   ← "באהבה 🙂"
-   ← "כיף לשמוע!"
-   ← "חחח יאלה"
-
-═══ ידע ═══
-עלים צהובים = השקיה יתרה (רוב המקרים) | קצות חומים = יובש/מזגן | פיקוס מפיל עלים = הזזה, לא לזוז | כנימה קמחית = מטלית לחה במים (לא מגבון), אח"כ ריסוס מים+סבון כלים | אקריות = ליטר מים + כפית סבון + חצי כפית שמן נים | פיקוס כינורי = שונא הזזה, להשקות כש-50% מתייבש | מונסטרה = עמוד מוס | סחלב = טבילה 10 דק' פעם בשבוע"""
+══ נושאים עם סרטונים ══
+נענע, פיקוס כינורי, אלוקסיה, פילודנדרון, בזיליקום, כנימה קמחית, זחל המודד, מונסטרה, קולאוס, סחלב, דשן מבננה, ביצן, השרשת אוויר"""
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 def get_db():
@@ -178,6 +164,28 @@ async def fetch_new_messages(since: datetime) -> tuple[list[dict], bool]:
 
     async with httpx.AsyncClient(timeout=30) as client:
 
+        def build_conv_history(all_msgs: list, page_id: str, since: datetime) -> list[dict]:
+            """בונה היסטוריית שיחה מהודעות לפני since — רק אם יש תגובה אמיתית מדניאל."""
+            history = []
+            for m in all_msgs:
+                if not m.get("message"):
+                    continue
+                created = datetime.fromisoformat(m["created_time"].replace("Z", "+00:00"))
+                if created >= since:
+                    continue  # הודעות חדשות — לא היסטוריה
+                from_id = m.get("from", {}).get("id", "")
+                is_daniel = (from_id == page_id)
+                history.append({
+                    "from": "דניאל" if is_daniel else m.get("from", {}).get("name", ""),
+                    "text": m["message"],
+                    "is_daniel": is_daniel,
+                })
+            # history מגיע בסדר הפוך (חדש→ישן), נהפוך לכרונולוגי ונשמור 8 אחרונות
+            history = list(reversed(history))[-8:]
+            # נחזיר רק אם יש תגובה קצרה מדניאל (לא מדריך)
+            has_real_reply = any(m["is_daniel"] and len(m["text"]) < 200 for m in history)
+            return history if has_real_reply else []
+
         # Instagram
         if INSTAGRAM_ACCOUNT_ID:
             try:
@@ -191,7 +199,9 @@ async def fetch_new_messages(since: datetime) -> tuple[list[dict], bool]:
                 convs = await fetch_all_pages(client, url, params)
                 any_success = True
                 for conv in convs:
-                    for msg in conv.get("messages", {}).get("data", []):
+                    all_conv_msgs = conv.get("messages", {}).get("data", [])
+                    conv_history = build_conv_history(all_conv_msgs, INSTAGRAM_ACCOUNT_ID, since)
+                    for msg in all_conv_msgs:
                         created = datetime.fromisoformat(
                             msg["created_time"].replace("Z", "+00:00")
                         )
@@ -207,6 +217,7 @@ async def fetch_new_messages(since: datetime) -> tuple[list[dict], bool]:
                             "sender_name": msg["from"].get("name", ""),
                             "platform": "instagram",
                             "message_text": msg["message"],
+                            "conv_history": conv_history,
                         })
             except Exception as e:
                 logger.error(f"Instagram fetch error: {type(e).__name__}: {e}")
@@ -223,7 +234,9 @@ async def fetch_new_messages(since: datetime) -> tuple[list[dict], bool]:
                 convs = await fetch_all_pages(client, url, params)
                 any_success = True
                 for conv in convs:
-                    for msg in conv.get("messages", {}).get("data", []):
+                    all_conv_msgs = conv.get("messages", {}).get("data", [])
+                    conv_history = build_conv_history(all_conv_msgs, FACEBOOK_PAGE_ID, since)
+                    for msg in all_conv_msgs:
                         created = datetime.fromisoformat(
                             msg["created_time"].replace("Z", "+00:00")
                         )
@@ -239,6 +252,7 @@ async def fetch_new_messages(since: datetime) -> tuple[list[dict], bool]:
                             "sender_name": msg["from"].get("name", ""),
                             "platform": "facebook",
                             "message_text": msg["message"],
+                            "conv_history": conv_history,
                         })
             except Exception as e:
                 logger.error(f"Facebook fetch error: {type(e).__name__}: {e}")
@@ -246,18 +260,30 @@ async def fetch_new_messages(since: datetime) -> tuple[list[dict], bool]:
     return messages, any_success
 
 # ─── Claude reply generation ──────────────────────────────────────────────────
-def generate_reply(sender_name: str, messages_list: list[str]) -> str:
-    """מקבל רשימת הודעות מאותו שולח ומחזיר תגובה אחת שמתייחסת לכולן."""
+def generate_reply(sender_name: str, messages_list: list[str],
+                   conv_history: list[dict] | None = None) -> str:
+    """מקבל הודעות חדשות + היסטוריה אופציונלית ומחזיר תגובה קצרה בסגנון דניאל."""
     name = sender_name or "הלקוח"
+
+    # בנה הקשר שיחה קודמת (רק אם יש)
+    history_block = ""
+    if conv_history:
+        lines = [f"{'דניאל' if m['is_daniel'] else name}: {m['text']}" for m in conv_history]
+        history_block = "=== שיחה קודמת ===\n" + "\n".join(lines) + "\n\n"
+
+    # בנה את ההודעה הנוכחית
     if len(messages_list) == 1:
-        content = f"{name}: {messages_list[0]}"
+        current = f"{name}: {messages_list[0]}"
     else:
         msgs_str = "\n".join(f"- {m}" for m in messages_list)
-        content = f"{name} שלח כמה הודעות:\n{msgs_str}"
+        current = f"{name} שלח:\n{msgs_str}"
+
+    content = history_block + current
+
     try:
         resp = anthropic.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
+            model="claude-sonnet-5",
+            max_tokens=200,
             system=DANIEL_PROMPT,
             messages=[{"role": "user", "content": content}],
         )
@@ -505,7 +531,8 @@ async def scan_and_notify(bot, since_override: datetime | None = None):
             continue
 
         # ─── ייצר תגובה אחת לכל ההודעות יחד ────────────────────────
-        suggested = generate_reply(sender_name or "הלקוח", all_texts)
+        conv_history = group_msgs[0].get("conv_history") or []
+        suggested = generate_reply(sender_name or "הלקוח", all_texts, conv_history)
 
         # שמור את ההודעה הראשונה (הכי חדשה) כ-primary ב-DB
         primary = new_msgs[0]
