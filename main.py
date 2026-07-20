@@ -261,9 +261,13 @@ def generate_reply(sender_name: str, messages_list: list[str]) -> str:
             system=DANIEL_PROMPT,
             messages=[{"role": "user", "content": content}],
         )
-        return resp.content[0].text.strip()
+        # מצא את בלוק הטקסט (מתעלם מ-thinking blocks)
+        for block in resp.content:
+            if hasattr(block, "text"):
+                return block.text.strip()
+        return ""
     except Exception as e:
-        logger.error(f"Claude error: {type(e).__name__}")
+        logger.error(f"Claude error: {type(e).__name__}: {e}")
         return ""
 
 # ─── Message filtering ────────────────────────────────────────────────────────
