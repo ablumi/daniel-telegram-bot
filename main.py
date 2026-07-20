@@ -6,15 +6,17 @@
 """
 
 import asyncio
+import html
 import logging
 import os
+import re
 import sqlite3
 import hmac
 import hashlib
 from datetime import datetime, timezone, timedelta
 
 import httpx
-from anthropic import Anthropic
+from anthropic import AsyncAnthropic
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -42,23 +44,32 @@ FACEBOOK_PAGE_ID     = os.environ.get("FACEBOOK_PAGE_ID", "")
 DB_PATH              = os.environ.get("DB_PATH", "messages.db")
 SCAN_HOURS           = int(os.environ.get("SCAN_HOURS", "12"))
 
-anthropic = Anthropic(api_key=ANTHROPIC_API_KEY)
+# Async — הקריאה ל-Claude לא חוסמת את הבוט (הכפתורים בטלגרם נשארים מגיבים בזמן סריקה)
+anthropic = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
 # ─── System prompt ────────────────────────────────────────────────────────────
-DANIEL_PROMPT = """אתה דניאל בנטל — "הלוחש לצמחים". אתה עונה על הודעות DM בשם דניאל.
+DANIEL_PROMPT = """אתה דניאל בנטל — "הלוחש לצמחים". כותב DM קצר וישיר בעברית ישראלית יומיומית.
 
-כלל ראשי: קצר מאוד — לא יותר מ-3 משפטים. שיחתי כמו WhatsApp.
+══ חוקי ברזל ══
+• מקסימום 1-2 משפטים. לפעמים 4 מילים מספיקות.
+• לא "שמחתי", לא "תודה על השאלה", לא "שלום", לא "ערב טוב", לא לחזור על מה שנשאל.
+• לא "חברי", לא חיבוקים, לא פתיחות מנומסות.
+• לא לציין מחירים אלא אם שאלו ישירות.
 
-5 סוגי תגובות:
-1. זיהוי + עצה אחת
-2. שאלה אבחנתית (שאלה אחת קצרה)
-3. הפנייה לייעוץ וידאו 99₪ לשאלות מורכבות — "רוצה שנקבע?"
-4. תגובה רגשית: "באהבה" / "🙂" / "חחח"
-5. עצה ישירה כשברור מה הבעיה
+══ מה לכתוב ══
+בעיה ברורה → עצה ספציפית אחת ישר: "זה השקיה יתרה, להשקות רק כש-2/3 מהאדמה יבשה"
+חסר מידע → שאלה אחת בלבד: "כמה פעמים אתה משקה?" / "יש לו חלון?"
+נושא עם סרטון → "העליתי על זה סרטון, כנס לעמוד 🌱"
+שאלה מורכבת → "היי [שם], כדי לאבחן נכון צריך לראות — ייעוץ וידאו חצי שעה 99₪, אם מתאים נקבע 🌱"
+תודה / נחמד → "באהבה 🙂" / "כיף לשמוע!" / "חחח"
 
-אסור: ❌ פתיחות מנומסות ❌ לחזור על מה ששאלו ❌ "אני ממליץ ש..." ❌ הרבה אמוג'י ❌ לסיים בשאלה (אלא שאלת מכירה)
+══ ידע ══
+עלים צהובים=השקיה יתרה | קצות חומים=יובש/מזגן | פיקוס מפיל עלים=הזזה
+כנימה קמחית: מטלית מים → ריסוס מים+סבון | אקריות: מים+סבון+שמן נים
+פיקוס כינורי: להשקות כש-50% יבש, שונא הזזה | מונסטרה: עמוד מוס | סחלב: טבילה 10 דק' פעם בשבוע
 
-ידע: עלים צהובים=השקיית יתר | קצות חומים=יובש/מזגן | פיקוס מפיל=הזזה/רוח | כנימה קמחית=מטלית לחה במים (לא מגבון!) | אקריות=שמן נים | ריסוס: ליטר מים+כפית סבון+חצי כפית שמן | פיקוס כינורי: שונא הזזה, להשקות כש-50% מתייבש | מונסטרה: עמוד מוס | סחלב: טבילה 10 דק' | ייעוץ וידאו: 99₪"""
+══ נושאים עם סרטונים ══
+נענע, פיקוס כינורי, אלוקסיה, פילודנדרון, בזיליקום, כנימה קמחית, זחל המודד, מונסטרה, קולאוס, סחלב, דשן מבננה, ביצן, השרשת אוויר"""
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 def get_db():
@@ -80,9 +91,15 @@ def init_db():
             suggested_reply TEXT,
             telegram_msg_id INTEGER,
             status          TEXT DEFAULT 'pending',
+            offered_consult INTEGER DEFAULT 0,
             created_at      TEXT DEFAULT (datetime('now'))
         )
     """)
+    # מיגרציה ל-DB קיים
+    try:
+        conn.execute("ALTER TABLE messages ADD COLUMN offered_consult INTEGER DEFAULT 0")
+    except Exception:
+        pass
     conn.execute("""
         CREATE TABLE IF NOT EXISTS state (
             key   TEXT PRIMARY KEY,
@@ -122,31 +139,60 @@ async def fetch_new_messages(since: datetime) -> tuple[list[dict], bool]:
         next_url = url
         next_params = params.copy()
         page = 0
-        while next_url and page < 20:  # מקסימום 20 דפים (500 שיחות)
+        while page < 20:  # מקסימום 20 דפים (500 שיחות)
             resp = await client.get(next_url, params=next_params)
             data = resp.json()
             if "error" in data:
                 logger.error(f"Meta API error: {data['error']}")
                 raise Exception(data["error"].get("message", "API error"))
-            results.extend(data.get("data", []))
-            # pagination
-            paging = data.get("paging", {})
-            next_url = paging.get("next")
-            next_params = {}  # next כבר מכיל את כל הפרמטרים
+            batch = data.get("data", [])
+            results.extend(batch)
             page += 1
-            # אם אין שיחות חדשות בדף הזה (הכל ישן) — עצור
-            if results:
-                last_conv = results[-1]
-                last_msgs = last_conv.get("messages", {}).get("data", [])
-                if last_msgs:
-                    oldest_in_page = datetime.fromisoformat(
-                        last_msgs[-1]["created_time"].replace("Z", "+00:00")
-                    )
-                    if oldest_in_page <= since:
-                        break
+            logger.info(f"  pagination page {page}: got {len(batch)} convs, total={len(results)}")
+
+            # בדוק אם יש עמוד הבא — תומך גם ב-next URL וגם ב-cursor
+            paging = data.get("paging", {})
+            next_url_candidate = paging.get("next")
+            if next_url_candidate:
+                next_url = next_url_candidate
+                next_params = {}  # next כבר מכיל את כל הפרמטרים
+            else:
+                # נסה cursor-based pagination
+                after_cursor = paging.get("cursors", {}).get("after")
+                if after_cursor:
+                    next_url = url
+                    next_params = {**params, "after": after_cursor}
+                else:
+                    break  # אין עמוד הבא
+
+            # אם הדף האחרון ריק — עצור
+            if not batch:
+                break
         return results
 
     async with httpx.AsyncClient(timeout=30) as client:
+
+        def build_conv_history(all_msgs: list, page_id: str, since: datetime) -> list[dict]:
+            """בונה היסטוריית שיחה מהודעות לפני since — רק אם יש תגובה אמיתית מדניאל."""
+            history = []
+            for m in all_msgs:
+                if not m.get("message"):
+                    continue
+                created = datetime.fromisoformat(m["created_time"].replace("Z", "+00:00"))
+                if created >= since:
+                    continue  # הודעות חדשות — לא היסטוריה
+                from_id = m.get("from", {}).get("id", "")
+                is_daniel = (from_id == page_id)
+                history.append({
+                    "from": "דניאל" if is_daniel else m.get("from", {}).get("name", ""),
+                    "text": m["message"],
+                    "is_daniel": is_daniel,
+                })
+            # history מגיע בסדר הפוך (חדש→ישן), נהפוך לכרונולוגי ונשמור 8 אחרונות
+            history = list(reversed(history))[-8:]
+            # נחזיר רק אם יש תגובה קצרה מדניאל (לא מדריך)
+            has_real_reply = any(m["is_daniel"] and len(m["text"]) < 200 for m in history)
+            return history if has_real_reply else []
 
         # Instagram
         if INSTAGRAM_ACCOUNT_ID:
@@ -155,13 +201,16 @@ async def fetch_new_messages(since: datetime) -> tuple[list[dict], bool]:
                 params = {
                     "platform": "instagram",
                     "access_token": META_PAGE_TOKEN,
-                    "fields": "messages{id,message,from,created_time}",
+                    # limit(100) — מכסה גם שיחות ארוכות בסריקות עמוקות (ברירת מחדל: 25)
+                    "fields": "messages.limit(100){id,message,from,created_time}",
                     "limit": 25,
                 }
                 convs = await fetch_all_pages(client, url, params)
                 any_success = True
                 for conv in convs:
-                    for msg in conv.get("messages", {}).get("data", []):
+                    all_conv_msgs = conv.get("messages", {}).get("data", [])
+                    conv_history = build_conv_history(all_conv_msgs, INSTAGRAM_ACCOUNT_ID, since)
+                    for msg in all_conv_msgs:
                         created = datetime.fromisoformat(
                             msg["created_time"].replace("Z", "+00:00")
                         )
@@ -177,9 +226,11 @@ async def fetch_new_messages(since: datetime) -> tuple[list[dict], bool]:
                             "sender_name": msg["from"].get("name", ""),
                             "platform": "instagram",
                             "message_text": msg["message"],
+                            "conv_history": conv_history,
                         })
             except Exception as e:
-                logger.error(f"Instagram fetch error: {type(e).__name__}: {e}")
+                # לא מדפיסים את e — שגיאות httpx כוללות את ה-URL עם ה-access_token
+                logger.error(f"Instagram fetch error: {type(e).__name__}")
 
         # Facebook
         if FACEBOOK_PAGE_ID:
@@ -187,13 +238,15 @@ async def fetch_new_messages(since: datetime) -> tuple[list[dict], bool]:
                 url = f"https://graph.facebook.com/v19.0/{FACEBOOK_PAGE_ID}/conversations"
                 params = {
                     "access_token": META_PAGE_TOKEN,
-                    "fields": "messages{id,message,from,created_time}",
+                    "fields": "messages.limit(100){id,message,from,created_time}",
                     "limit": 25,
                 }
                 convs = await fetch_all_pages(client, url, params)
                 any_success = True
                 for conv in convs:
-                    for msg in conv.get("messages", {}).get("data", []):
+                    all_conv_msgs = conv.get("messages", {}).get("data", [])
+                    conv_history = build_conv_history(all_conv_msgs, FACEBOOK_PAGE_ID, since)
+                    for msg in all_conv_msgs:
                         created = datetime.fromisoformat(
                             msg["created_time"].replace("Z", "+00:00")
                         )
@@ -209,26 +262,106 @@ async def fetch_new_messages(since: datetime) -> tuple[list[dict], bool]:
                             "sender_name": msg["from"].get("name", ""),
                             "platform": "facebook",
                             "message_text": msg["message"],
+                            "conv_history": conv_history,
                         })
             except Exception as e:
-                logger.error(f"Facebook fetch error: {type(e).__name__}: {e}")
+                logger.error(f"Facebook fetch error: {type(e).__name__}")
 
     return messages, any_success
 
 # ─── Claude reply generation ──────────────────────────────────────────────────
-def generate_reply(sender_name: str, message: str) -> str:
-    content = f"{sender_name}: {message}" if sender_name else message
+async def generate_reply(sender_name: str, messages_list: list[str],
+                         conv_history: list[dict] | None = None,
+                         avoid: str | None = None) -> str:
+    """מקבל הודעות חדשות + היסטוריה אופציונלית ומחזיר תגובה קצרה בסגנון דניאל.
+    avoid — ניסוח קודם שיש לנסח אחרת (לכפתור 'נסח מחדש')."""
+    name = sender_name or "הלקוח"
+
+    # בנה הקשר שיחה קודמת (רק אם יש)
+    history_block = ""
+    if conv_history:
+        lines = [f"{'דניאל' if m['is_daniel'] else name}: {m['text']}" for m in conv_history]
+        history_block = "=== שיחה קודמת ===\n" + "\n".join(lines) + "\n\n"
+
+    # בנה את ההודעה הנוכחית
+    if len(messages_list) == 1:
+        current = f"{name}: {messages_list[0]}"
+    else:
+        msgs_str = "\n".join(f"- {m}" for m in messages_list)
+        current = f"{name} שלח:\n{msgs_str}"
+
+    content = history_block + current
+    if avoid:
+        content += f"\n\n(נסח תשובה שונה מהניסוח הזה: \"{avoid}\")"
+
     try:
-        resp = anthropic.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
+        resp = await anthropic.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=200,
             system=DANIEL_PROMPT,
             messages=[{"role": "user", "content": content}],
         )
-        return resp.content[0].text.strip()
-    except Exception as e:
-        logger.error(f"Claude error: {type(e).__name__}")
+        logger.info(f"Claude blocks: {[b.type for b in resp.content]}")
+        for block in resp.content:
+            if block.type == "text":
+                return block.text.strip()
+        logger.warning("Claude returned no text block")
         return ""
+    except Exception as e:
+        logger.error(f"Claude error: {type(e).__name__}: {e}")
+        return ""
+
+# ─── Consult-offer detection (מעקב המרות) ────────────────────────────────────
+def is_consult_offer(reply: str) -> bool:
+    """מזהה אם התשובה מציעה ייעוץ בתשלום."""
+    if not reply:
+        return False
+    return "99" in reply or "ייעוץ" in reply
+
+# ─── Message filtering ────────────────────────────────────────────────────────
+_SYSTEM_MSGS = {
+    'להתחלה', 'get started', 'התחל', 'start', 'started', 'מתחיל', 'begin',
+    'hi', 'hello', 'hey',
+}
+# ביטויים מרובי מילים של מערכת פייסבוק/אינסטגרם
+_SYSTEM_PHRASES = [
+    'you missed a call',
+    'missed a call from',
+    'you can call',
+    'within the next',
+    'sent an attachment',
+    'שלח/ה קובץ',
+    'liked your message',
+]
+_SPAM_WORDS = [
+    'seo', 'digital marketing', 'שיתוף פעולה עסקי', 'להציע שיתוף',
+    'האתר שלנו', 'מוצר שלנו', 'שירות שלנו', 'קידום אתרים',
+    'casino', 'crypto', 'bitcoin', 'investment', 'השקעה מובטחת',
+    'הלוואה', 'רווח מהיר',
+]
+
+def should_skip_message(text: str) -> tuple[bool, str]:
+    """מחזיר (לדלג, סיבה). True = אין צורך לענות."""
+    if not text or not text.strip():
+        return True, 'empty'
+    stripped = text.strip()
+    lower = stripped.lower()
+
+    # הודעות מערכת של פייסבוק / קצרות מדי ללא תוכן
+    if lower in _SYSTEM_MSGS or len(stripped) <= 2:
+        return True, 'system_message'
+
+    # ביטויי מערכת מרובי מילים
+    for phrase in _SYSTEM_PHRASES:
+        if phrase in lower:
+            return True, 'system_message'
+
+    # ספאם / מכירות
+    for word in _SPAM_WORDS:
+        if word in lower:
+            return True, 'spam'
+
+    return False, ''
 
 # ─── Meta API — send ──────────────────────────────────────────────────────────
 async def send_meta_message(sender_id: str, text: str, platform: str) -> bool:
@@ -247,20 +380,126 @@ async def send_meta_message(sender_id: str, text: str, platform: str) -> bool:
         logger.error(f"Meta send error: {type(e).__name__}")
         return False
 
+# ─── Thank-you detection ─────────────────────────────────────────────────────
+_THANKS_WORDS = [
+    'תודה', 'תודות', 'תנקיו', 'תנקס',
+    'thanks', 'thank you', 'thank u', 'thanku', 'ty', 'thx', 'tyvm', 'tysm',
+    'merci', 'gracias', 'danke',
+]
+# קריאות/אישורים שיכולים לבוא לפני "תודה" בלי לשנות את המשמעות
+_POSITIVE_EXCL = [
+    'וואו', 'wow', 'יופי', 'מעולה', 'נהדר', 'כיף', 'מגניב',
+    'אחלה', 'סבבה', 'ממש', 'מדהים', 'מושלם', 'נכון', 'בדיוק',
+    'אוקי', 'אוקיי', 'ok', 'okay', 'great',
+]
+_EMOJI_RE = re.compile(
+    r'[\U00010000-\U0010FFFF☀-➿︀-️‍⃣\U0001FA00-\U0001FA9F]',
+    re.UNICODE
+)
+
+def is_thank_you_only(text: str) -> bool:
+    """מחזיר True אם ההודעה היא רק תודה/אמוג'י ואין בה שאלה או בקשה נוספת."""
+    if not text or not text.strip():
+        return False
+    stripped = text.strip()
+
+    # אם יש סימן שאלה — יש שאלה, צריך תגובה
+    if '?' in stripped or '؟' in stripped:
+        return False
+
+    # הסר אמוג'י, סימני פיסוק ורווחים
+    no_emoji = _EMOJI_RE.sub('', stripped).strip()
+    no_punct = re.sub(r'[!.,;:\'"()\-–—]', '', no_emoji).strip().lower()
+
+    # הודעת אמוג'י בלבד — לייק
+    if not no_punct:
+        return True
+
+    # אם ארוך מ-60 תווים אחרי ניקוי — כנראה יש תוכן נוסף
+    if len(no_punct) > 60:
+        return False
+
+    # הסר קריאות חיוביות מתחילת ההודעה (וואו. תודה רבה → תודה רבה)
+    temp = no_punct
+    for excl in _POSITIVE_EXCL:
+        if temp.startswith(excl):
+            temp = temp[len(excl):].strip()
+            break  # הסר רק אחת
+
+    # בדוק אם מה שנשאר הוא תודה בלבד
+    no_punct = temp
+
+    # בדוק אם מתחיל בביטוי תודה וכלום חשוב אחריו
+    for word in _THANKS_WORDS:
+        if no_punct == word or no_punct.startswith(word + ' ') or no_punct.startswith(word + '!'):
+            # וודא שמה שאחרי זה גם תודה (תודה תודה תודה) ולא משפט חדש
+            rest = no_punct[len(word):].strip().lstrip('!')
+            if not rest or all(
+                rest.startswith(w) or rest == w
+                for w in _THANKS_WORDS
+                if rest.startswith(w)
+            ):
+                return True
+            # אם מה שנשאר הוא עוד תודות — בסדר
+            rest_clean = re.sub(r'\b(' + '|'.join(_THANKS_WORDS) + r')\b', '', rest).strip()
+            if not rest_clean:
+                return True
+    return False
+
+
+async def send_meta_like(message_id: str, sender_id: str, platform: str) -> bool:
+    """שולח לייק ❤️ על הודעה ב-Instagram או Facebook."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            if platform == "instagram":
+                url = f"https://graph.facebook.com/v19.0/{message_id}/likes"
+                resp = await client.post(url, params={"access_token": META_PAGE_TOKEN})
+            else:
+                # Facebook Messenger — react to message
+                url = "https://graph.facebook.com/v19.0/me/messages"
+                payload = {
+                    "recipient": {"id": sender_id},
+                    "sender_action": "react",
+                    "payload": {"message_id": message_id, "reaction": "love"},
+                }
+                resp = await client.post(
+                    url, json=payload,
+                    headers={"Authorization": f"Bearer {META_PAGE_TOKEN}"}
+                )
+            if resp.status_code == 200:
+                return True
+            logger.warning(f"Like API {resp.status_code}: {resp.text[:120]}")
+            return False
+    except Exception as e:
+        logger.error(f"Meta like error: {type(e).__name__}")
+        return False
+
+
 # ─── Telegram message formatting ──────────────────────────────────────────────
 PLATFORM_EMOJI = {"instagram": "📸", "facebook": "💙"}
 
 def build_telegram_text(msg: dict) -> str:
     emoji = PLATFORM_EMOJI.get(msg["platform"], "💬")
     platform_name = "Instagram" if msg["platform"] == "instagram" else "Facebook"
-    name = msg["sender_name"] or "משתמש"
+    # escape — טקסט מהמשתמש עלול להכיל < > & שישברו את parse_mode=HTML (או יזייפו עיצוב)
+    name = html.escape(msg["sender_name"] or "משתמש")
+    all_msgs = [html.escape(m) for m in msg.get("all_messages", [msg["message_text"]])]
+    reply = html.escape(msg["suggested_reply"] or "") or "⏳ מייצר תשובה..."
+
+    if len(all_msgs) > 1:
+        msgs_block = "\n".join(f"▸ {m}" for m in all_msgs)
+        header = f"{emoji} <b>{platform_name}</b> • {name} <i>({len(all_msgs)} הודעות)</i>"
+    else:
+        msgs_block = all_msgs[0]
+        header = f"{emoji} <b>{platform_name}</b> • {name}"
+
     return (
-        f"{emoji} <b>{platform_name}</b> • {name}\n"
+        f"{header}\n"
         f"─────────────────\n"
-        f"{msg['message_text']}\n"
+        f"{msgs_block}\n"
         f"─────────────────\n"
         f"💬 <b>תשובה מוצעת:</b>\n"
-        f"{msg['suggested_reply'] or '⏳ מייצר תשובה...'}"
+        f"{reply}"
     )
 
 def build_keyboard(msg_id: int) -> InlineKeyboardMarkup:
@@ -269,14 +508,15 @@ def build_keyboard(msg_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ שלח", callback_data=f"send:{msg_id}"),
             InlineKeyboardButton("✏️ ערוך ושלח", callback_data=f"edit:{msg_id}"),
             InlineKeyboardButton("⏭️ דלג", callback_data=f"skip:{msg_id}"),
-        ]
+        ],
+        [InlineKeyboardButton("🔄 נסח מחדש", callback_data=f"regen:{msg_id}")],
     ])
 
 # ─── Scanner ──────────────────────────────────────────────────────────────────
-async def scan_and_notify(bot):
+async def scan_and_notify(bot, since_override: datetime | None = None):
     """הסריקה הראשית — מושכת DMs חדשים ושולחת לטלגרם."""
     logger.info("Starting scan...")
-    since = get_last_scan()
+    since = since_override if since_override is not None else get_last_scan()
     now = datetime.now(timezone.utc)
 
     messages, success = await fetch_new_messages(since)
@@ -287,34 +527,104 @@ async def scan_and_notify(bot):
 
     conn = get_db()
     new_count = 0
+    liked_names = []
 
+    # ─── קיבוץ לפי שולח+פלטפורמה ────────────────────────────────────────
+    # הודעות מגיעות מהחדשה לישנה; קובצות לפי שולח, מוצגות מהישנה לחדשה
+    from collections import OrderedDict
+    groups: OrderedDict[tuple, list] = OrderedDict()
     for msg in messages:
-        # בדוק שלא עיבדנו כבר
-        exists = conn.execute(
-            "SELECT id FROM messages WHERE msg_id=?", (msg["msg_id"],)
-        ).fetchone()
-        if exists:
+        key = (msg["sender_id"], msg["platform"])
+        groups.setdefault(key, []).append(msg)
+
+    for (sender_id, platform), group_msgs in groups.items():
+        sender_name = group_msgs[0].get("sender_name", "")
+
+        # סנן הודעות שכבר עובדו
+        new_msgs = [
+            m for m in group_msgs
+            if not conn.execute(
+                "SELECT 1 FROM messages WHERE msg_id=?", (m["msg_id"],)
+            ).fetchone()
+        ]
+        if not new_msgs:
             continue
 
-        # ייצר תשובה
-        suggested = generate_reply(msg["sender_name"] or "הלקוח", msg["message_text"])
-        msg["suggested_reply"] = suggested
+        # הצג מהישנה לחדשה
+        new_msgs_asc = list(reversed(new_msgs))
+        all_texts = [m["message_text"] for m in new_msgs_asc]
+        combined_text = " | ".join(all_texts)
 
-        # שמור ב-DB
+        # ─── פילטר: מערכת / ספאם ──────────────────────────────────────
+        skip, reason = should_skip_message(combined_text)
+        if skip:
+            for m in new_msgs:
+                conn.execute(
+                    "INSERT OR IGNORE INTO messages "
+                    "(msg_id,sender_id,sender_name,platform,message_text,status) "
+                    "VALUES (?,?,?,?,?,'skipped')",
+                    (m["msg_id"], sender_id, sender_name, platform, m["message_text"])
+                )
+            conn.commit()
+            logger.info(f"Skipped ({reason}): {combined_text[:50]}")
+            continue
+
+        # ─── לייק אוטומטי אם כולן תודה ───────────────────────────────
+        if all(is_thank_you_only(t) for t in all_texts):
+            liked = await send_meta_like(new_msgs[0]["msg_id"], sender_id, platform)
+            status = "liked" if liked else "skipped"
+            for m in new_msgs:
+                conn.execute(
+                    "INSERT OR IGNORE INTO messages "
+                    "(msg_id,sender_id,sender_name,platform,message_text,status) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (m["msg_id"], sender_id, sender_name, platform, m["message_text"], status)
+                )
+            conn.commit()
+            if liked:
+                liked_names.append(sender_name or "משתמש")
+            continue
+
+        # ─── ייצר תגובה אחת לכל ההודעות יחד ────────────────────────
+        conv_history = group_msgs[0].get("conv_history") or []
+        suggested = await generate_reply(sender_name or "הלקוח", all_texts, conv_history)
+
+        # שמור את ההודעה הראשונה (הכי חדשה) כ-primary ב-DB
+        primary = new_msgs[0]
         cur = conn.execute(
-            """INSERT INTO messages (msg_id, sender_id, sender_name, platform, message_text, suggested_reply)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (msg["msg_id"], msg["sender_id"], msg["sender_name"],
-             msg["platform"], msg["message_text"], suggested)
+            "INSERT INTO messages "
+            "(msg_id,sender_id,sender_name,platform,message_text,suggested_reply,offered_consult) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (primary["msg_id"], sender_id, sender_name, platform,
+             combined_text, suggested, int(is_consult_offer(suggested)))
         )
         conn.commit()
         db_id = cur.lastrowid
 
-        # שלח לטלגרם
+        # סמן שאר ההודעות כ-grouped
+        for m in new_msgs[1:]:
+            conn.execute(
+                "INSERT OR IGNORE INTO messages "
+                "(msg_id,sender_id,sender_name,platform,message_text,status) "
+                "VALUES (?,?,?,?,?,'grouped')",
+                (m["msg_id"], sender_id, sender_name, platform, m["message_text"])
+            )
+        conn.commit()
+
+        # שלח לטלגרם עם כל ההודעות גלויות
+        display_msg = {
+            "msg_id": primary["msg_id"],
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "platform": platform,
+            "message_text": combined_text,
+            "all_messages": all_texts,
+            "suggested_reply": suggested,
+        }
         try:
             tg_msg = await bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
-                text=build_telegram_text(msg),
+                text=build_telegram_text(display_msg),
                 parse_mode="HTML",
                 reply_markup=build_keyboard(db_id),
             )
@@ -325,9 +635,22 @@ async def scan_and_notify(bot):
             conn.commit()
             new_count += 1
         except Exception as e:
-            logger.error(f"Telegram send error: {type(e).__name__}")
+            logger.error(f"Telegram send error: {type(e).__name__}: {e}")
 
     conn.close()
+
+    # שלח סיכום לייקים אם היו
+    if liked_names:
+        names_str = ", ".join(liked_names[:15])
+        suffix = f" ועוד {len(liked_names)-15}" if len(liked_names) > 15 else ""
+        try:
+            await bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=f"❤️ לייק אוטומטי נשלח ל-{len(liked_names)} הודעות תודה:\n{names_str}{suffix}"
+            )
+        except Exception as e:
+            logger.error(f"Telegram liked summary error: {type(e).__name__}")
+
     # מקדם last_scan רק אם ה-API הצליח — כדי לא לדלג על הודעות בזמן תקלות
     if success:
         set_last_scan(now)
@@ -337,6 +660,56 @@ async def scan_and_notify(bot):
 
     if new_count > 0:
         logger.info(f"Sent {new_count} messages to Telegram")
+
+# ─── Weekly digest ────────────────────────────────────────────────────────────
+async def send_weekly_digest(bot):
+    """סיכום שבועי: השאלות הנפוצות + רעיונות לסרטונים על בסיס מה שאנשים שואלים."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT message_text FROM messages "
+        "WHERE created_at >= datetime('now','-7 days') AND status != 'grouped' "
+        "ORDER BY created_at DESC LIMIT 150"
+    ).fetchall()
+    conn.close()
+
+    texts = [r["message_text"] for r in rows if r["message_text"] and r["message_text"].strip()]
+    if len(texts) < 3:
+        await bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text="📋 דוח שבועי: פחות מ-3 הודעות השבוע — אין מספיק נתונים לסיכום."
+        )
+        return
+
+    joined = "\n".join(f"- {t[:200]}" for t in texts)
+    prompt = (
+        "אלה הודעות DM שקיבל דניאל ('הלוחש לצמחים') מהעוקבים בשבוע האחרון:\n\n"
+        f"{joined}\n\n"
+        "כתוב סיכום קצר בעברית:\n"
+        "1. 3-5 הנושאים/שאלות הכי נפוצים (עם ספירה משוערת)\n"
+        "2. 3 רעיונות לסרטונים שיענו על השאלות האלה (כל רעיון בשורה, עם הוק מוצע)\n"
+        "3. תובנה אחת מעניינת אם יש\n"
+        "קצר וישיר, בלי פתיחות."
+    )
+    try:
+        resp = await anthropic.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=700,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        summary = next((b.text for b in resp.content if b.type == "text"), "")
+    except Exception as e:
+        logger.error(f"Digest Claude error: {type(e).__name__}")
+        summary = ""
+
+    if not summary:
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="❌ שגיאה ביצירת הדוח השבועי")
+        return
+
+    # בלי parse_mode — הטקסט מבוסס על הודעות משתמשים
+    await bot.send_message(
+        chat_id=TELEGRAM_CHAT_ID,
+        text=f"📋 דוח שבועי — {len(texts)} הודעות ב-7 הימים האחרונים\n\n{summary}"
+    )
 
 # ─── Telegram handlers ────────────────────────────────────────────────────────
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -359,6 +732,17 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "send":
+        # אטומי — תופס את ההודעה לפני השליחה, מונע שליחה כפולה בלחיצה מהירה פעמיים
+        conn = get_db()
+        cur = conn.execute(
+            "UPDATE messages SET status='sending' WHERE id=? AND status='pending'",
+            (msg_id,)
+        )
+        conn.commit()
+        conn.close()
+        if cur.rowcount == 0:
+            return  # כבר טופלה
+
         success = await send_meta_message(row["sender_id"], row["suggested_reply"], row["platform"])
         status_line = "✅ נשלח!" if success else "❌ שגיאה בשליחה"
         new_text = build_telegram_text(dict(row)) + f"\n\n{status_line}"
@@ -374,6 +758,32 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text="✏️ כתוב את התשובה שאתה רוצה לשלוח:"
+        )
+
+    elif action == "regen":
+        # נסח מחדש — מבקש מ-Claude ניסוח חלופי ומעדכן את ההודעה בטלגרם
+        texts = row["message_text"].split(" | ")
+        new_reply = await generate_reply(
+            row["sender_name"] or "הלקוח", texts, avoid=row["suggested_reply"]
+        )
+        if not new_reply:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id, text="❌ שגיאה בניסוח מחדש — נסה שוב"
+            )
+            return
+        conn = get_db()
+        conn.execute(
+            "UPDATE messages SET suggested_reply=?, offered_consult=? WHERE id=?",
+            (new_reply, int(is_consult_offer(new_reply)), msg_id)
+        )
+        conn.commit()
+        conn.close()
+        display = dict(row)
+        display["suggested_reply"] = new_reply
+        display["all_messages"] = texts
+        await query.edit_message_text(
+            build_telegram_text(display), parse_mode="HTML",
+            reply_markup=build_keyboard(msg_id)
         )
 
     elif action == "skip":
@@ -408,8 +818,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ נשלח!")
         conn = get_db()
         conn.execute(
-            "UPDATE messages SET status='sent', suggested_reply=? WHERE id=?",
-            (new_reply, editing_id)
+            "UPDATE messages SET status='sent', suggested_reply=?, offered_consult=? WHERE id=?",
+            (new_reply, int(is_consult_offer(new_reply)), editing_id)
         )
         conn.commit()
         conn.close()
@@ -419,15 +829,44 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """פקודה /scan לסריקה ידנית."""
-    user_id = update.effective_user.id if update.effective_user else None
-    logger.info(f"cmd_scan called by user_id={user_id}, expected={TELEGRAM_CHAT_ID}")
-    if user_id != TELEGRAM_CHAT_ID:
-        logger.warning(f"Unauthorized /scan from {user_id}")
+    """פקודה /scan — מציגה תפריט סריקה."""
+    if update.effective_user.id != TELEGRAM_CHAT_ID:
         return
-    await update.message.reply_text("🔍 סורק הודעות חדשות...")
-    await scan_and_notify(context.bot)
-    await update.message.reply_text("✅ סריקה הושלמה")
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏱️ מאז הסריקה האחרונה", callback_data="scan:auto")],
+        [InlineKeyboardButton("🕐 24 שעות אחרונות",    callback_data="scan:1")],
+        [InlineKeyboardButton("📅 שבוע אחרון",          callback_data="scan:7")],
+        [InlineKeyboardButton("🗓️ חודש אחרון (30 יום)", callback_data="scan:30")],
+        [InlineKeyboardButton("📦 סריקה מלאה (90 יום)", callback_data="scan:90")],
+    ])
+    last = get_last_scan()
+    await update.message.reply_text(
+        f"🔍 <b>בחר טווח סריקה</b>\n"
+        f"סריקה אחרונה: {last.strftime('%d/%m %H:%M')}",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+async def handle_scan_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """מטפל בבחירת טווח הסריקה."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != TELEGRAM_CHAT_ID:
+        return
+
+    choice = query.data.split(":")[1]
+    labels = {"auto": "מאז הסריקה האחרונה", "1": "24 שעות", "7": "שבוע", "30": "חודש", "90": "90 יום"}
+
+    if choice == "auto":
+        since = None  # scan_and_notify ישתמש ב-last_scan
+    else:
+        since = datetime.now(timezone.utc) - timedelta(days=int(choice))
+
+    await query.edit_message_text(f"🔍 סורק — {labels.get(choice, choice)}...")
+    await scan_and_notify(context.bot, since_override=since)
+    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ סריקה הושלמה")
 
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -450,6 +889,29 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_clear_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודה /clear_db — מוחק את כל ההודעות השמורות במסד הנתונים ומאפס את הסריקה."""
+    if update.effective_user.id != TELEGRAM_CHAT_ID:
+        return
+    conn = get_db()
+    count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    conn.execute("DELETE FROM messages")
+    conn.commit()
+    days = 90
+    if context.args:
+        try:
+            days = int(context.args[0])
+        except ValueError:
+            pass
+    new_since = datetime.now(timezone.utc) - timedelta(days=days)
+    set_last_scan(new_since)
+    await update.message.reply_text(
+        f"🗑️ נמחקו {count} הודעות מהמסד.\n"
+        f"חלון הסריקה אופס ל-{days} ימים אחורה.\n"
+        f"הרץ /scan עכשיו כדי לסרוק מחדש."
+    )
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודה /status — מציגה סטטיסטיקה."""
     if update.effective_user.id != TELEGRAM_CHAT_ID:
@@ -458,6 +920,14 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = conn.execute("SELECT COUNT(*) FROM messages WHERE status='pending'").fetchone()[0]
     sent    = conn.execute("SELECT COUNT(*) FROM messages WHERE status='sent'").fetchone()[0]
     skipped = conn.execute("SELECT COUNT(*) FROM messages WHERE status='skipped'").fetchone()[0]
+    liked   = conn.execute("SELECT COUNT(*) FROM messages WHERE status='liked'").fetchone()[0]
+    consult_sent = conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE status='sent' AND offered_consult=1"
+    ).fetchone()[0]
+    consult_month = conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE status='sent' AND offered_consult=1 "
+        "AND created_at >= datetime('now','-30 days')"
+    ).fetchone()[0]
     last    = get_last_scan()
     conn.close()
     await update.message.reply_text(
@@ -465,8 +935,17 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ ממתין: {pending}\n"
         f"✅ נשלח: {sent}\n"
         f"⏭️ דולג: {skipped}\n"
+        f"❤️ לייקים: {liked}\n"
+        f"💰 הצעות ייעוץ שנשלחו: {consult_sent} (החודש: {consult_month})\n"
         f"🕐 סריקה אחרונה: {last.strftime('%d/%m %H:%M')}"
     )
+
+async def cmd_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודה /digest — מפיק דוח שבועי מיידי."""
+    if update.effective_user.id != TELEGRAM_CHAT_ID:
+        return
+    await update.message.reply_text("📋 מכין דוח שבועי...")
+    await send_weekly_digest(context.bot)
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 async def main():
@@ -476,10 +955,13 @@ async def main():
     # בנה את אפליקציית הטלגרם
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    app.add_handler(CallbackQueryHandler(handle_scan_choice, pattern=r"^scan:"))
     app.add_handler(CallbackQueryHandler(handle_button))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("clear_db", cmd_clear_db))
+    app.add_handler(CommandHandler("digest", cmd_digest))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Scheduler לסריקה אוטומטית
@@ -490,8 +972,16 @@ async def main():
         hour="9,21",   # 9 בבוקר ו-9 בערב
         kwargs={"bot": app.bot},
     )
+    # דוח שבועי — יום ראשון 09:30
+    scheduler.add_job(
+        send_weekly_digest,
+        "cron",
+        day_of_week="sun",
+        hour=9, minute=30,
+        kwargs={"bot": app.bot},
+    )
     scheduler.start()
-    logger.info(f"Scheduler started — scanning at 09:00 and 21:00 Israel time")
+    logger.info(f"Scheduler started — scans 09:00/21:00, weekly digest Sun 09:30 Israel time")
 
     # הפעל את הבוט עם polling
     async with app:
