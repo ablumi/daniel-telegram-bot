@@ -427,10 +427,10 @@ def build_keyboard(msg_id: int) -> InlineKeyboardMarkup:
     ])
 
 # ─── Scanner ──────────────────────────────────────────────────────────────────
-async def scan_and_notify(bot):
+async def scan_and_notify(bot, since_override: datetime | None = None):
     """הסריקה הראשית — מושכת DMs חדשים ושולחת לטלגרם."""
     logger.info("Starting scan...")
-    since = get_last_scan()
+    since = since_override if since_override is not None else get_last_scan()
     now = datetime.now(timezone.utc)
 
     messages, success = await fetch_new_messages(since)
@@ -655,15 +655,44 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """פקודה /scan לסריקה ידנית."""
-    user_id = update.effective_user.id if update.effective_user else None
-    logger.info(f"cmd_scan called by user_id={user_id}, expected={TELEGRAM_CHAT_ID}")
-    if user_id != TELEGRAM_CHAT_ID:
-        logger.warning(f"Unauthorized /scan from {user_id}")
+    """פקודה /scan — מציגה תפריט סריקה."""
+    if update.effective_user.id != TELEGRAM_CHAT_ID:
         return
-    await update.message.reply_text("🔍 סורק הודעות חדשות...")
-    await scan_and_notify(context.bot)
-    await update.message.reply_text("✅ סריקה הושלמה")
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏱️ מאז הסריקה האחרונה", callback_data="scan:auto")],
+        [InlineKeyboardButton("🕐 24 שעות אחרונות",    callback_data="scan:1")],
+        [InlineKeyboardButton("📅 שבוע אחרון",          callback_data="scan:7")],
+        [InlineKeyboardButton("🗓️ חודש אחרון (30 יום)", callback_data="scan:30")],
+        [InlineKeyboardButton("📦 סריקה מלאה (90 יום)", callback_data="scan:90")],
+    ])
+    last = get_last_scan()
+    await update.message.reply_text(
+        f"🔍 <b>בחר טווח סריקה</b>\n"
+        f"סריקה אחרונה: {last.strftime('%d/%m %H:%M')}",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+async def handle_scan_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """מטפל בבחירת טווח הסריקה."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != TELEGRAM_CHAT_ID:
+        return
+
+    choice = query.data.split(":")[1]
+    labels = {"auto": "מאז הסריקה האחרונה", "1": "24 שעות", "7": "שבוע", "30": "חודש", "90": "90 יום"}
+
+    if choice == "auto":
+        since = None  # scan_and_notify ישתמש ב-last_scan
+    else:
+        since = datetime.now(timezone.utc) - timedelta(days=int(choice))
+
+    await query.edit_message_text(f"🔍 סורק — {labels.get(choice, choice)}...")
+    await scan_and_notify(context.bot, since_override=since)
+    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ סריקה הושלמה")
 
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -712,6 +741,7 @@ async def main():
     # בנה את אפליקציית הטלגרם
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    app.add_handler(CallbackQueryHandler(handle_scan_choice, pattern=r"^scan:"))
     app.add_handler(CallbackQueryHandler(handle_button))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("status", cmd_status))
