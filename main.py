@@ -100,6 +100,10 @@ def init_db():
         conn.execute("ALTER TABLE messages ADD COLUMN offered_consult INTEGER DEFAULT 0")
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE messages ADD COLUMN original_suggestion TEXT")
+    except Exception:
+        pass
     conn.execute("""
         CREATE TABLE IF NOT EXISTS state (
             key   TEXT PRIMARY KEY,
@@ -817,8 +821,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if success:
         await update.message.reply_text("✅ נשלח!")
         conn = get_db()
+        # שומר את ההצעה המקורית של הבוט — חומר למידה (/learn)
         conn.execute(
-            "UPDATE messages SET status='sent', suggested_reply=?, offered_consult=? WHERE id=?",
+            "UPDATE messages SET status='sent', original_suggestion=suggested_reply, "
+            "suggested_reply=?, offered_consult=? WHERE id=?",
             (new_reply, int(is_consult_offer(new_reply)), editing_id)
         )
         conn.commit()
@@ -940,6 +946,44 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🕐 סריקה אחרונה: {last.strftime('%d/%m %H:%M')}"
     )
 
+async def cmd_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודה /learn — מציגה את התיקונים האחרונים של דניאל (הבוט הציע ≠ דניאל שלח).
+    זה חומר הלמידה לריענון בנק הדוגמאות בפרומפט."""
+    if update.effective_user.id != TELEGRAM_CHAT_ID:
+        return
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT sender_name, message_text, original_suggestion, suggested_reply, created_at "
+        "FROM messages WHERE original_suggestion IS NOT NULL AND status='sent' "
+        "AND original_suggestion != suggested_reply "
+        "ORDER BY created_at DESC LIMIT 30"
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        await update.message.reply_text(
+            "📚 אין עדיין תיקונים.\n"
+            "מעכשיו, כל פעם שתלחץ ✏️ ותשנה תשובה — התיקון יישמר כאן.\n"
+            "פעם בחודש שלח את הפלט של /learn לאבירם לריענון הפרומפט."
+        )
+        return
+
+    blocks = []
+    for r in rows:
+        blocks.append(
+            f"❓ {r['message_text'][:200]}\n"
+            f"🤖 הבוט הציע: {r['original_suggestion'][:200]}\n"
+            f"✅ דניאל שלח: {r['suggested_reply'][:200]}"
+        )
+    text = (
+        f"📚 {len(rows)} תיקונים אחרונים — העתק ושלח לאבירם לריענון הפרומפט:\n\n"
+        + "\n──────────\n".join(blocks)
+    )
+    # טלגרם מוגבל ל-4096 תווים להודעה — פיצול
+    for i in range(0, len(text), 4000):
+        await update.message.reply_text(text[i:i + 4000])
+
+
 async def cmd_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודה /digest — מפיק דוח שבועי מיידי."""
     if update.effective_user.id != TELEGRAM_CHAT_ID:
@@ -962,6 +1006,7 @@ async def main():
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("clear_db", cmd_clear_db))
     app.add_handler(CommandHandler("digest", cmd_digest))
+    app.add_handler(CommandHandler("learn", cmd_learn))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Scheduler לסריקה אוטומטית
