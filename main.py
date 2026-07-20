@@ -8,6 +8,7 @@
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 import hmac
 import hashlib
@@ -110,12 +111,50 @@ def set_last_scan(ts: datetime):
     conn.close()
 
 # ─── Meta API — polling ───────────────────────────────────────────────────────
-async def fetch_new_messages(since: datetime) -> list[dict]:
-    """מושך הודעות חדשות מ-Instagram ו-Facebook מאז זמן נתון."""
+async def fetch_new_messages(since: datetime) -> tuple[list[dict], bool]:
+    """מושך הודעות חדשות מ-Instagram ו-Facebook מאז זמן נתון.
+    מחזיר (הודעות, הצלחה) — הצלחה=True רק אם לפחות פלטפורמה אחת הצליחה."""
     messages = []
-    since_ts = int(since.timestamp())
+    any_success = False
 
-    async with httpx.AsyncClient(timeout=20) as client:
+    async def fetch_all_pages(client, url, params):
+        """מושך את כל הדפים של conversations עם pagination."""
+        results = []
+        next_url = url
+        next_params = params.copy()
+        page = 0
+        while page < 20:  # מקסימום 20 דפים (500 שיחות)
+            resp = await client.get(next_url, params=next_params)
+            data = resp.json()
+            if "error" in data:
+                logger.error(f"Meta API error: {data['error']}")
+                raise Exception(data["error"].get("message", "API error"))
+            batch = data.get("data", [])
+            results.extend(batch)
+            page += 1
+            logger.info(f"  pagination page {page}: got {len(batch)} convs, total={len(results)}")
+
+            # בדוק אם יש עמוד הבא — תומך גם ב-next URL וגם ב-cursor
+            paging = data.get("paging", {})
+            next_url_candidate = paging.get("next")
+            if next_url_candidate:
+                next_url = next_url_candidate
+                next_params = {}  # next כבר מכיל את כל הפרמטרים
+            else:
+                # נסה cursor-based pagination
+                after_cursor = paging.get("cursors", {}).get("after")
+                if after_cursor:
+                    next_url = url
+                    next_params = {**params, "after": after_cursor}
+                else:
+                    break  # אין עמוד הבא
+
+            # אם הדף האחרון ריק — עצור
+            if not batch:
+                break
+        return results
+
+    async with httpx.AsyncClient(timeout=30) as client:
 
         # Instagram
         if INSTAGRAM_ACCOUNT_ID:
@@ -125,10 +164,11 @@ async def fetch_new_messages(since: datetime) -> list[dict]:
                     "platform": "instagram",
                     "access_token": META_PAGE_TOKEN,
                     "fields": "messages{id,message,from,created_time}",
+                    "limit": 25,
                 }
-                resp = await client.get(url, params=params)
-                data = resp.json()
-                for conv in data.get("data", []):
+                convs = await fetch_all_pages(client, url, params)
+                any_success = True
+                for conv in convs:
                     for msg in conv.get("messages", {}).get("data", []):
                         created = datetime.fromisoformat(
                             msg["created_time"].replace("Z", "+00:00")
@@ -136,7 +176,7 @@ async def fetch_new_messages(since: datetime) -> list[dict]:
                         if created <= since:
                             continue
                         if msg.get("from", {}).get("id") == INSTAGRAM_ACCOUNT_ID:
-                            continue  # הודעה שיצאה מהחשבון עצמו
+                            continue
                         if not msg.get("message"):
                             continue
                         messages.append({
@@ -156,10 +196,11 @@ async def fetch_new_messages(since: datetime) -> list[dict]:
                 params = {
                     "access_token": META_PAGE_TOKEN,
                     "fields": "messages{id,message,from,created_time}",
+                    "limit": 25,
                 }
-                resp = await client.get(url, params=params)
-                data = resp.json()
-                for conv in data.get("data", []):
+                convs = await fetch_all_pages(client, url, params)
+                any_success = True
+                for conv in convs:
                     for msg in conv.get("messages", {}).get("data", []):
                         created = datetime.fromisoformat(
                             msg["created_time"].replace("Z", "+00:00")
@@ -180,7 +221,7 @@ async def fetch_new_messages(since: datetime) -> list[dict]:
             except Exception as e:
                 logger.error(f"Facebook fetch error: {type(e).__name__}: {e}")
 
-    return messages
+    return messages, any_success
 
 # ─── Claude reply generation ──────────────────────────────────────────────────
 def generate_reply(sender_name: str, message: str) -> str:
@@ -214,6 +255,85 @@ async def send_meta_message(sender_id: str, text: str, platform: str) -> bool:
         logger.error(f"Meta send error: {type(e).__name__}")
         return False
 
+# ─── Thank-you detection ─────────────────────────────────────────────────────
+_THANKS_WORDS = [
+    'תודה', 'תודות', 'תנקיו', 'תנקס',
+    'thanks', 'thank you', 'thank u', 'thanku', 'ty', 'thx', 'tyvm', 'tysm',
+    'merci', 'gracias', 'danke',
+]
+_EMOJI_RE = re.compile(
+    r'[\U00010000-\U0010FFFF☀-➿︀-️‍⃣\U0001FA00-\U0001FA9F]',
+    re.UNICODE
+)
+
+def is_thank_you_only(text: str) -> bool:
+    """מחזיר True אם ההודעה היא רק תודה/אמוג'י ואין בה שאלה או בקשה נוספת."""
+    if not text or not text.strip():
+        return False
+    stripped = text.strip()
+
+    # אם יש סימן שאלה — יש שאלה, צריך תגובה
+    if '?' in stripped or '؟' in stripped:
+        return False
+
+    # הסר אמוג'י, סימני פיסוק ורווחים
+    no_emoji = _EMOJI_RE.sub('', stripped).strip()
+    no_punct = re.sub(r'[!.,;:\'"()\-–—]', '', no_emoji).strip().lower()
+
+    # הודעת אמוג'י בלבד — לייק
+    if not no_punct:
+        return True
+
+    # אם ארוך מ-60 תווים אחרי ניקוי — כנראה יש תוכן נוסף
+    if len(no_punct) > 60:
+        return False
+
+    # בדוק אם מתחיל בביטוי תודה וכלום חשוב אחריו
+    for word in _THANKS_WORDS:
+        if no_punct == word or no_punct.startswith(word + ' ') or no_punct.startswith(word + '!'):
+            # וודא שמה שאחרי זה גם תודה (תודה תודה תודה) ולא משפט חדש
+            rest = no_punct[len(word):].strip().lstrip('!')
+            if not rest or all(
+                rest.startswith(w) or rest == w
+                for w in _THANKS_WORDS
+                if rest.startswith(w)
+            ):
+                return True
+            # אם מה שנשאר הוא עוד תודות — בסדר
+            rest_clean = re.sub(r'\b(' + '|'.join(_THANKS_WORDS) + r')\b', '', rest).strip()
+            if not rest_clean:
+                return True
+    return False
+
+
+async def send_meta_like(message_id: str, sender_id: str, platform: str) -> bool:
+    """שולח לייק ❤️ על הודעה ב-Instagram או Facebook."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            if platform == "instagram":
+                url = f"https://graph.facebook.com/v19.0/{message_id}/likes"
+                resp = await client.post(url, params={"access_token": META_PAGE_TOKEN})
+            else:
+                # Facebook Messenger — react to message
+                url = "https://graph.facebook.com/v19.0/me/messages"
+                payload = {
+                    "recipient": {"id": sender_id},
+                    "sender_action": "react",
+                    "payload": {"message_id": message_id, "reaction": "love"},
+                }
+                resp = await client.post(
+                    url, json=payload,
+                    headers={"Authorization": f"Bearer {META_PAGE_TOKEN}"}
+                )
+            if resp.status_code == 200:
+                return True
+            logger.warning(f"Like API {resp.status_code}: {resp.text[:120]}")
+            return False
+    except Exception as e:
+        logger.error(f"Meta like error: {type(e).__name__}: {e}")
+        return False
+
+
 # ─── Telegram message formatting ──────────────────────────────────────────────
 PLATFORM_EMOJI = {"instagram": "📸", "facebook": "💙"}
 
@@ -246,14 +366,15 @@ async def scan_and_notify(bot):
     since = get_last_scan()
     now = datetime.now(timezone.utc)
 
-    messages = await fetch_new_messages(since)
-    logger.info(f"Found {len(messages)} new messages")
+    messages, success = await fetch_new_messages(since)
+    logger.info(f"Found {len(messages)} new messages (api_success={success})")
 
     if not messages:
         return
 
     conn = get_db()
     new_count = 0
+    liked_names = []  # סיכום לייקים אוטומטיים
 
     for msg in messages:
         # בדוק שלא עיבדנו כבר
@@ -263,7 +384,23 @@ async def scan_and_notify(bot):
         if exists:
             continue
 
-        # ייצר תשובה
+        # ─── לייק אוטומטי להודעות תודה ───────────────────────────────────
+        if is_thank_you_only(msg["message_text"]):
+            liked = await send_meta_like(msg["msg_id"], msg["sender_id"], msg["platform"])
+            status = "liked" if liked else "skipped"
+            conn.execute(
+                """INSERT INTO messages (msg_id, sender_id, sender_name, platform, message_text, status)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (msg["msg_id"], msg["sender_id"], msg["sender_name"],
+                 msg["platform"], msg["message_text"], status)
+            )
+            conn.commit()
+            logger.info(f"Auto-liked message from {msg['sender_name']} ({msg['platform']}): {msg['message_text'][:40]}")
+            if liked:
+                liked_names.append(msg.get("sender_name") or "משתמש")
+            continue
+
+        # ─── עיבוד רגיל: ייצר תשובה ושלח לטלגרם ─────────────────────────
         suggested = generate_reply(msg["sender_name"] or "הלקוח", msg["message_text"])
         msg["suggested_reply"] = suggested
 
@@ -295,7 +432,25 @@ async def scan_and_notify(bot):
             logger.error(f"Telegram send error: {type(e).__name__}")
 
     conn.close()
-    set_last_scan(now)
+
+    # שלח סיכום לייקים אם היו
+    if liked_names:
+        names_str = ", ".join(liked_names[:15])
+        suffix = f" ועוד {len(liked_names)-15}" if len(liked_names) > 15 else ""
+        try:
+            await bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=f"❤️ לייק אוטומטי נשלח ל-{len(liked_names)} הודעות תודה:\n{names_str}{suffix}"
+            )
+        except Exception as e:
+            logger.error(f"Telegram liked summary error: {type(e).__name__}")
+
+    # מקדם last_scan רק אם ה-API הצליח — כדי לא לדלג על הודעות בזמן תקלות
+    if success:
+        set_last_scan(now)
+        logger.info(f"last_scan updated to {now.isoformat()}")
+    else:
+        logger.warning("Skipping last_scan update — all API calls failed")
 
     if new_count > 0:
         logger.info(f"Sent {new_count} messages to Telegram")
@@ -392,6 +547,26 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ סריקה הושלמה")
 
 
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודה /reset [ימים] — מאפס את חלון הסריקה N ימים אחורה (ברירת מחדל: 30)."""
+    if update.effective_user.id != TELEGRAM_CHAT_ID:
+        return
+    days = 30
+    if context.args:
+        try:
+            days = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ שימוש: /reset [מספר ימים]")
+            return
+    new_since = datetime.now(timezone.utc) - timedelta(days=days)
+    set_last_scan(new_since)
+    await update.message.reply_text(
+        f"🔄 חלון הסריקה אופס ל-{days} ימים אחורה.\n"
+        f"הסריקה הבאה תמשוך הודעות מאז {new_since.strftime('%d/%m/%Y %H:%M')} UTC.\n"
+        f"הרץ /scan עכשיו כדי לסרוק מיד."
+    )
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודה /status — מציגה סטטיסטיקה."""
     if update.effective_user.id != TELEGRAM_CHAT_ID:
@@ -421,6 +596,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(handle_button))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Scheduler לסריקה אוטומטית
