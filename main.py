@@ -46,44 +46,43 @@ SCAN_HOURS           = int(os.environ.get("SCAN_HOURS", "12"))
 anthropic = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # ─── System prompt ────────────────────────────────────────────────────────────
-DANIEL_PROMPT = """אתה דניאל בנטל — "הלוחש לצמחים". אתה עונה על DM מעוקבים בשם דניאל.
+DANIEL_PROMPT = """אתה דניאל בנטל — "הלוחש לצמחים". אתה כותב תגובות DM בשם דניאל, בעברית ישראלית טבעית ושוטפת.
 
 ═══ כללי ברזל ═══
-• קצר מאוד — הודעה אחת, עד 3 משפטים קצרים. לפעמים 4 מילים מספיקות.
-• שפה שיחתית כמו WhatsApp — בלי פיסוק מיותר, בלי פורמליות
-• אם אתה מבין את הבעיה — עצה ישירה בלי הקדמות
-• אם צריך מידע — שאלה אחת בלבד
-• אסור: "שמחתי לשמוע" / "תודה על השאלה" / "אני ממליץ ש" / "שלום" / "ערב טוב" / לחזור על מה שנכתב / פסקאות ארוכות
+• עברית ישראלית יומיומית — כמו הודעת WhatsApp לחבר. לא ספרותית, לא מתורגמת.
+• קצר מאוד — משפט-שניים. לפעמים 3-4 מילים מספיקות.
+• ישיר — אם ברור מה הבעיה, תיתן עצה בלי הקדמות.
+• אסור בהחלט: "שמחתי לשמוע", "תודה על השאלה", "אני ממליץ ש...", "שלום", "ערב טוב", לחזור על מה שנכתב, משפטים ארוכים, לציין מחירים.
 
-═══ 5 סוגי תגובות ═══
+═══ 5 סוגי תגובות — עם דוגמאות אמיתיות ═══
 
-1. עצה ישירה — כשהבעיה ברורה:
-   "כן לשים אותו במקום מואר יותר מסכנציק"
-   "זה נשמע כמו השקיה יתרה, תנסי להשקות רק כש-2/3 מהאדמה מתייבשת"
+1. עצה ישירה (כשהבעיה ברורה):
+   ← "כן לשים אותו במקום מואר יותר מסכנציק"
+   ← "זה נשמע השקיה יתרה, להשקות רק כש-2/3 מהאדמה מתייבשת"
+   ← "תנסי להוריד אותו קצת מהחלון, השמש הישירה שורפת"
 
-2. שאלה אבחנתית — כשצריך עוד מידע (שאלה אחת!):
-   "איזה תולעת?" / "יש לו מספיק אור?" / "כמה זמן יש לך אותו?" / "כמה פעמים בשבוע את משקה?"
+2. שאלה אבחנתית (שאלה אחת בלבד, כשחסר מידע):
+   ← "איזה תולעת?"
+   ← "יש לו מספיק אור?"
+   ← "כמה פעמים בשבוע את משקה?"
+   ← "זחל ירוק?"
 
-3. הפנייה לסרטון — כשהנושא מכוסה בסרטון:
-   "העליתי סרטון על זה לא מזמן, כנסי לעמוד 🌱"
-   סרטונים קיימים: נענע, פיקוס כינורי, אלוקסיה, פילודנדרון, בזיליקום, air layering, כנימה קמחית, זחל המודד, מונסטרה, קולאוס, סחלב, דשן מבננה, ביצן, שתייה מצמחים
+3. הפנייה לסרטון (כשיש סרטון רלוונטי בעמוד):
+   ← "העליתי סרטון על זה לא מזמן, כנסי לעמוד 🌱"
+   ← "יש לי סרטון על זה, הוא היה על הנענע שלי — כנסי לעמוד"
+   נושאים עם סרטונים: נענע, פיקוס כינורי, אלוקסיה, פילודנדרון, בזיליקום, השרשת אוויר, כנימה קמחית, זחל המודד, מונסטרה, קולאוס, סחלב, דשן מבננה, ביצן
 
-4. הפנייה לייעוץ — כשמורכב מדי לDM:
-   "היי [שם], כדי שאוכל לאבחן נכון צריך לראות — יש ייעוץ וידאו חצי שעה ב-99₪, אם מתאים נקבע 🌱"
+4. הפנייה לייעוץ (שאלה מורכבת שדורשת לראות):
+   ← "היי [שם], כדי שאוכל לאבחן נכון צריך לראות — יש לי ייעוץ וידאו אם זה מתאים לך 🌱"
+   לא לציין מחיר! רק לשאול אם מתאים, דניאל יסגור לבד.
 
-5. תגובה רגשית — כשמישהו שותף הצלחה / כותב דברים נחמדים:
-   "באהבה 🙂" / "חחח יאלה" / "כיף לשמוע"
+5. תגובה רגשית (הצלחה / דברים נחמדים):
+   ← "באהבה 🙂"
+   ← "כיף לשמוע!"
+   ← "חחח יאלה"
 
-═══ ידע מקצועי ═══
-עלים צהובים = השקיית יתר (90% מהמקרים)
-קצות חומים = יובש / מזגן / מים קשים
-עלים נופלים על פיקוס = הזזה/רוח (לא לזוז ממקומו)
-כנימה קמחית = מטלית לחה במים בלבד (לא מגבון לח! כימיקלים), אחר כך ריסוס מים+סבון כלים
-אקריות (עכבישיות) = שמן נים, ריסוס: ליטר מים + כפית סבון + חצי כפית שמן נים
-פיקוס כינורי = שונא הזזה, להשקות רק כש-50% מתייבש, אור עקיף חזק
-מונסטרה = צריך עמוד מוס, עלים חדשים = מים
-סחלב = השקיה בטבילה 10 דק' פעם בשבוע, אחר כך לנקז לגמרי
-השרשה = כוס מים, אור עקיף, להחליף מים כל יומיים"""
+═══ ידע ═══
+עלים צהובים = השקיה יתרה (רוב המקרים) | קצות חומים = יובש/מזגן | פיקוס מפיל עלים = הזזה, לא לזוז | כנימה קמחית = מטלית לחה במים (לא מגבון), אח"כ ריסוס מים+סבון כלים | אקריות = ליטר מים + כפית סבון + חצי כפית שמן נים | פיקוס כינורי = שונא הזזה, להשקות כש-50% מתייבש | מונסטרה = עמוד מוס | סחלב = טבילה 10 דק' פעם בשבוע"""
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 def get_db():
@@ -252,7 +251,7 @@ def generate_reply(sender_name: str, message: str) -> str:
     content = f"{sender_name}: {message}" if sender_name else message
     try:
         resp = anthropic.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-5",
             max_tokens=300,
             system=DANIEL_PROMPT,
             messages=[{"role": "user", "content": content}],
@@ -261,6 +260,36 @@ def generate_reply(sender_name: str, message: str) -> str:
     except Exception as e:
         logger.error(f"Claude error: {type(e).__name__}")
         return ""
+
+# ─── Message filtering ────────────────────────────────────────────────────────
+_SYSTEM_MSGS = {
+    'להתחלה', 'get started', 'התחל', 'start', 'started', 'מתחיל', 'begin',
+    'hi', 'hello', 'hey',
+}
+_SPAM_WORDS = [
+    'seo', 'digital marketing', 'שיתוף פעולה עסקי', 'להציע שיתוף',
+    'האתר שלנו', 'מוצר שלנו', 'שירות שלנו', 'קידום אתרים',
+    'casino', 'crypto', 'bitcoin', 'investment', 'השקעה מובטחת',
+    'הלוואה', 'רווח מהיר',
+]
+
+def should_skip_message(text: str) -> tuple[bool, str]:
+    """מחזיר (לדלג, סיבה). True = אין צורך לענות."""
+    if not text or not text.strip():
+        return True, 'empty'
+    stripped = text.strip()
+    lower = stripped.lower()
+
+    # הודעות מערכת של פייסבוק / קצרות מדי ללא תוכן
+    if lower in _SYSTEM_MSGS or len(stripped) <= 2:
+        return True, 'system_message'
+
+    # ספאם / מכירות
+    for word in _SPAM_WORDS:
+        if word in lower:
+            return True, 'spam'
+
+    return False, ''
 
 # ─── Meta API — send ──────────────────────────────────────────────────────────
 async def send_meta_message(sender_id: str, text: str, platform: str) -> bool:
@@ -398,9 +427,36 @@ async def scan_and_notify(bot):
 
     conn = get_db()
     new_count = 0
-    liked_names = []  # סיכום לייקים אוטומטיים
+    liked_names = []
+
+    # ─── קיבוץ לפי שולח: רק ההודעה האחרונה מכל שולח ────────────────────
+    seen_senders = set()
+    primary_msgs = []   # הודעה אחת לכל שולח — תישלח לטלגרם
+    duplicate_msgs = [] # שאר ההודעות מאותו שולח — יסומנו כ-skipped
 
     for msg in messages:
+        key = (msg["sender_id"], msg["platform"])
+        # הודעות מגיעות מהחדשה לישנה, אז הראשונה שנראית = האחרונה שנשלחה
+        if key not in seen_senders:
+            seen_senders.add(key)
+            primary_msgs.append(msg)
+        else:
+            duplicate_msgs.append(msg)
+
+    # סמן כפילויות כ-skipped ב-DB (בלי לשלוח לטלגרם)
+    for msg in duplicate_msgs:
+        conn.execute(
+            """INSERT OR IGNORE INTO messages
+               (msg_id, sender_id, sender_name, platform, message_text, status)
+               VALUES (?, ?, ?, ?, ?, 'skipped')""",
+            (msg["msg_id"], msg["sender_id"], msg["sender_name"],
+             msg["platform"], msg["message_text"])
+        )
+    if duplicate_msgs:
+        conn.commit()
+        logger.info(f"Skipped {len(duplicate_msgs)} duplicate messages (same sender)")
+
+    for msg in primary_msgs:
         # בדוק שלא עיבדנו כבר
         exists = conn.execute(
             "SELECT id FROM messages WHERE msg_id=?", (msg["msg_id"],)
@@ -408,18 +464,33 @@ async def scan_and_notify(bot):
         if exists:
             continue
 
+        # ─── פילטר: הודעות מערכת / ספאם ─────────────────────────────────
+        skip, skip_reason = should_skip_message(msg["message_text"])
+        if skip:
+            conn.execute(
+                """INSERT OR IGNORE INTO messages
+                   (msg_id, sender_id, sender_name, platform, message_text, status)
+                   VALUES (?, ?, ?, ?, ?, 'skipped')""",
+                (msg["msg_id"], msg["sender_id"], msg["sender_name"],
+                 msg["platform"], msg["message_text"])
+            )
+            conn.commit()
+            logger.info(f"Skipped ({skip_reason}): {msg['message_text'][:40]}")
+            continue
+
         # ─── לייק אוטומטי להודעות תודה ───────────────────────────────────
         if is_thank_you_only(msg["message_text"]):
             liked = await send_meta_like(msg["msg_id"], msg["sender_id"], msg["platform"])
             status = "liked" if liked else "skipped"
             conn.execute(
-                """INSERT INTO messages (msg_id, sender_id, sender_name, platform, message_text, status)
+                """INSERT OR IGNORE INTO messages
+                   (msg_id, sender_id, sender_name, platform, message_text, status)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (msg["msg_id"], msg["sender_id"], msg["sender_name"],
                  msg["platform"], msg["message_text"], status)
             )
             conn.commit()
-            logger.info(f"Auto-liked message from {msg['sender_name']} ({msg['platform']}): {msg['message_text'][:40]}")
+            logger.info(f"Auto-liked: {msg.get('sender_name')} — {msg['message_text'][:40]}")
             if liked:
                 liked_names.append(msg.get("sender_name") or "משתמש")
             continue
@@ -428,9 +499,9 @@ async def scan_and_notify(bot):
         suggested = generate_reply(msg["sender_name"] or "הלקוח", msg["message_text"])
         msg["suggested_reply"] = suggested
 
-        # שמור ב-DB
         cur = conn.execute(
-            """INSERT INTO messages (msg_id, sender_id, sender_name, platform, message_text, suggested_reply)
+            """INSERT INTO messages
+               (msg_id, sender_id, sender_name, platform, message_text, suggested_reply)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (msg["msg_id"], msg["sender_id"], msg["sender_name"],
              msg["platform"], msg["message_text"], suggested)
@@ -438,7 +509,6 @@ async def scan_and_notify(bot):
         conn.commit()
         db_id = cur.lastrowid
 
-        # שלח לטלגרם
         try:
             tg_msg = await bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
