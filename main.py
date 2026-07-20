@@ -256,15 +256,16 @@ def generate_reply(sender_name: str, messages_list: list[str]) -> str:
         content = f"{name} שלח כמה הודעות:\n{msgs_str}"
     try:
         resp = anthropic.messages.create(
-            model="claude-sonnet-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=300,
             system=DANIEL_PROMPT,
             messages=[{"role": "user", "content": content}],
         )
-        # מצא את בלוק הטקסט (מתעלם מ-thinking blocks)
+        logger.info(f"Claude blocks: {[b.type for b in resp.content]}")
         for block in resp.content:
-            if hasattr(block, "text"):
+            if block.type == "text":
                 return block.text.strip()
+        logger.warning("Claude returned no text block")
         return ""
     except Exception as e:
         logger.error(f"Claude error: {type(e).__name__}: {e}")
