@@ -719,6 +719,29 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_clear_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודה /clear_db — מוחק את כל ההודעות השמורות במסד הנתונים ומאפס את הסריקה."""
+    if update.effective_user.id != TELEGRAM_CHAT_ID:
+        return
+    conn = get_db()
+    count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    conn.execute("DELETE FROM messages")
+    conn.commit()
+    days = 90
+    if context.args:
+        try:
+            days = int(context.args[0])
+        except ValueError:
+            pass
+    new_since = datetime.now(timezone.utc) - timedelta(days=days)
+    set_last_scan(new_since)
+    await update.message.reply_text(
+        f"🗑️ נמחקו {count} הודעות מהמסד.\n"
+        f"חלון הסריקה אופס ל-{days} ימים אחורה.\n"
+        f"הרץ /scan עכשיו כדי לסרוק מחדש."
+    )
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודה /status — מציגה סטטיסטיקה."""
     if update.effective_user.id != TELEGRAM_CHAT_ID:
@@ -750,6 +773,7 @@ async def main():
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("clear_db", cmd_clear_db))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Scheduler לסריקה אוטומטית
