@@ -302,6 +302,16 @@ _SYSTEM_MSGS = {
     'להתחלה', 'get started', 'התחל', 'start', 'started', 'מתחיל', 'begin',
     'hi', 'hello', 'hey',
 }
+# ביטויים מרובי מילים של מערכת פייסבוק/אינסטגרם
+_SYSTEM_PHRASES = [
+    'you missed a call',
+    'missed a call from',
+    'you can call',
+    'within the next',
+    'sent an attachment',
+    'שלח/ה קובץ',
+    'liked your message',
+]
 _SPAM_WORDS = [
     'seo', 'digital marketing', 'שיתוף פעולה עסקי', 'להציע שיתוף',
     'האתר שלנו', 'מוצר שלנו', 'שירות שלנו', 'קידום אתרים',
@@ -319,6 +329,11 @@ def should_skip_message(text: str) -> tuple[bool, str]:
     # הודעות מערכת של פייסבוק / קצרות מדי ללא תוכן
     if lower in _SYSTEM_MSGS or len(stripped) <= 2:
         return True, 'system_message'
+
+    # ביטויי מערכת מרובי מילים
+    for phrase in _SYSTEM_PHRASES:
+        if phrase in lower:
+            return True, 'system_message'
 
     # ספאם / מכירות
     for word in _SPAM_WORDS:
@@ -350,6 +365,12 @@ _THANKS_WORDS = [
     'thanks', 'thank you', 'thank u', 'thanku', 'ty', 'thx', 'tyvm', 'tysm',
     'merci', 'gracias', 'danke',
 ]
+# קריאות/אישורים שיכולים לבוא לפני "תודה" בלי לשנות את המשמעות
+_POSITIVE_EXCL = [
+    'וואו', 'wow', 'יופי', 'מעולה', 'נהדר', 'כיף', 'מגניב',
+    'אחלה', 'סבבה', 'ממש', 'מדהים', 'מושלם', 'נכון', 'בדיוק',
+    'אוקי', 'אוקיי', 'ok', 'okay', 'great',
+]
 _EMOJI_RE = re.compile(
     r'[\U00010000-\U0010FFFF☀-➿︀-️‍⃣\U0001FA00-\U0001FA9F]',
     re.UNICODE
@@ -376,6 +397,16 @@ def is_thank_you_only(text: str) -> bool:
     # אם ארוך מ-60 תווים אחרי ניקוי — כנראה יש תוכן נוסף
     if len(no_punct) > 60:
         return False
+
+    # הסר קריאות חיוביות מתחילת ההודעה (וואו. תודה רבה → תודה רבה)
+    temp = no_punct
+    for excl in _POSITIVE_EXCL:
+        if temp.startswith(excl):
+            temp = temp[len(excl):].strip()
+            break  # הסר רק אחת
+
+    # בדוק אם מה שנשאר הוא תודה בלבד
+    no_punct = temp
 
     # בדוק אם מתחיל בביטוי תודה וכלום חשוב אחריו
     for word in _THANKS_WORDS:
