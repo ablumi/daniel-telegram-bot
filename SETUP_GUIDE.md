@@ -1,11 +1,34 @@
 # מדריך הגדרה — טלגרם DM Bot
 ## הלוחש לצמחים
 
-הבוט סורק Instagram + Facebook פעמיים ביום (9:00 + 21:00), מייצר תשובות מוצעות, ושולח לדניאל בטלגרם עם כפתורים לאישור.
+הבוט סורק Instagram + Facebook פעמיים ביום (9:00 + 21:00 שעון ישראל), מייצר תשובות מוצעות,
+ושולח אותן בטלגרם עם כפתורי אישור. אפשר להגדיר כמה נמענים — כולם מקבלים, כל אחד יכול לענות.
 
 ---
 
-## ✅ ערכים מאושרים (כבר ידועים)
+## איפה זה רץ
+
+| | |
+|---|---|
+| פלטפורמה | **Railway** (`railway.com`) |
+| חשבון | aviram.blumi@gmail.com |
+| פרויקט | `joyful-youthfulness` → סביבה `production` |
+| שירות | `daniel-telegram-bot` |
+| ריפו | `github.com/ablumi/daniel-telegram-bot`, ענף `main` |
+| דיפלוי | אוטומטי בכל push ל-`main` |
+| Builder | Railpack (מזהה Python לבד, `python@3.13.14`) |
+| אזור | US West |
+| Volume | `daniel-telegram-bot-db`, מותקן ב-`/data`, 500MB |
+| Restart | On Failure |
+
+> ⚠️ **לא Render.** בעבר תוכנן דיפלוי לרנדר ונשארו שרידים בקוד ובמדריך — זה בוטל.
+> בחשבון Render אין שום שירות.
+
+אין קובץ config-as-code (`railway.json`) — כל ההגדרות יושבות בדשבורד של ריילוויי.
+
+---
+
+## ✅ ערכים מאושרים
 
 | משתנה | ערך |
 |---|---|
@@ -13,44 +36,64 @@
 | `INSTAGRAM_ACCOUNT_ID` | `753951067792932` |
 | Business ID | `3949184355323776` |
 | Meta App ID | `1390706479789623` |
-| `TELEGRAM_CHAT_IDS` | `68081535` (אבירם) — מוסיפים נמענים נוספים בפסיק |
+| `TELEGRAM_CHAT_IDS` | `68081535` (אבירם) — נמענים נוספים מופרדים בפסיק |
 
 ---
 
-## שלב 1: צור/חדש בוט טלגרם
+## משתני סביבה
 
-> ⚠️ הטוקן הישן נחשף — **חייב ליצור חדש**
+בריילוויי: השירות → לשונית **Variables**.
 
-1. פתח טלגרם וחפש: **@BotFather**
-2. שלח `/revoke` ← בחר את הבוט הישן → אשר (מבטל את הטוקן הישן)
-3. שלח `/token` ← בחר את הבוט → קבל **Bot Token חדש**
-   (או `/newbot` אם תרצה בוט חדש לגמרי)
-4. שמור את ה-Token החדש ל-`TELEGRAM_BOT_TOKEN`
+| שם משתנה | ערך |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Token מ-BotFather |
+| `TELEGRAM_CHAT_IDS` | `68081535` (או כמה, מופרדים בפסיק) |
+| `TELEGRAM_CHAT_NAMES` | אופציונלי — שמות לתצוגה באותו סדר, למשל `אבירם,דניאל` |
+| `META_PAGE_ACCESS_TOKEN` | Long-lived Page Token (ראה למטה) |
+| `INSTAGRAM_ACCOUNT_ID` | `753951067792932` |
+| `FACEBOOK_PAGE_ID` | `1103082102889183` |
+| `ANTHROPIC_API_KEY` | מ-console.anthropic.com |
+| `DB_PATH` | `/data/messages.db` (על ה-volume — לא למחוק, שם יושבות ההודעות) |
+| `SCAN_HOURS` | אופציונלי, ברירת מחדל 12 |
+
+`TELEGRAM_CHAT_ID` הישן (יחיד) עדיין נתמך בקוד כתאימות לאחור, ומוגדר כרשת ביטחון.
+
+**שינוי משתנה:** עורכים → Railway מציג "Apply N changes" → לוחצים **Deploy**. הבוט עולה מחדש תוך כדקה.
 
 ---
 
-## שלב 2: קבל Page Access Token (הכי חשוב!)
+## הוספת נמען נוסף לבוט
 
-**אבירם בלומי** צריך לעשות זאת מה-browser שלו (לא של דניאל):
+כל נמען מקבל את אותן הצעות ויכול לשלוח/לערוך/לדלג. מי שמגיב ראשון מנצח —
+אצל השני ההודעה מתעדכנת ל"✅ נשלח (על ידי X)" והכפתורים נעלמים. שליחה כפולה חסומה ברמת ה-DB.
+
+1. הנמען החדש פותח את הבוט בטלגרם ולוחץ **Start**.
+   חובה — בלי זה טלגרם חוסם שליחה אליו, ואין שגיאה בולטת, פשוט שקט.
+2. הוא שולח `/start` ל-**@userinfobot** ומקבל את ה-ID המספרי שלו.
+3. Railway → `daniel-telegram-bot` → Variables:
+   - `TELEGRAM_CHAT_IDS` = `68081535,<ID החדש>`
+   - `TELEGRAM_CHAT_NAMES` = `אבירם,דניאל` (אותו סדר)
+4. **Deploy**.
+5. בדיקה: מהחשבון החדש שולחים `/status` לבוט. אם ענה — הוא מחובר.
+
+**להסרת נמען:** מוחקים את ה-ID מהרשימה ו-Deploy.
+
+---
+
+## Page Access Token של Meta
+
+**אבירם** צריך לעשות זאת מהדפדפן שלו (לא דניאל) — הוא ה-Admin של ה-Meta App.
 
 1. פתח: `https://developers.facebook.com/tools/explorer/?app_id=1390706479789623`
-   - ודא שאתה מחובר כ-**Aviram Blumi** (לא כ-Daniel)
-2. תחת "Meta App" — בחר **lochesh-plants-bot**
-3. תחת "User or Page" — בחר **User Token**
-4. תחת Permissions, הוסף:
-   - ✅ `pages_messaging`
-   - ✅ `pages_show_list`
-   - ✅ `pages_read_engagement`
-5. לחץ **"Generate Access Token"**
-6. בפופאפ שנפתח — אשר את כל ההרשאות ובחר את דף **"דניאל הלוחש לצמחים"**
-7. חזור ל-Explorer, שנה URL ל: `me/accounts`
-8. לחץ **Submit**
-9. בתשובה תראה את דף "דניאל הלוחש לצמחים" עם שדה `access_token`
-10. **זהו ה-`META_PAGE_ACCESS_TOKEN`** — שמור אותו!
+   - ודא שאתה מחובר כ-**Aviram Blumi**
+2. Meta App → **lochesh-plants-bot**
+3. User or Page → **User Token**
+4. Permissions: `pages_messaging`, `pages_show_list`, `pages_read_engagement`
+5. **Generate Access Token** → אשר → בחר את דף **"דניאל הלוחש לצמחים"**
+6. שנה URL ל-`me/accounts` → **Submit**
+7. בתשובה, השדה `access_token` של הדף — **זהו ה-`META_PAGE_ACCESS_TOKEN`**
 
-> **למה אבירם ולא דניאל?** אבירם הוא Admin של ה-Meta App. בחשבון של אבירם, `/me/accounts` יחזיר את דף "דניאל הלוחש לצמחים" כי אבירם הוא גם Full Access Admin של הדף.
-
-### המרה ל-Long-lived Token (60 יום):
+### המרה ל-Long-lived (60 יום)
 
 ```bash
 curl "https://graph.facebook.com/v19.0/oauth/access_token\
@@ -60,55 +103,19 @@ curl "https://graph.facebook.com/v19.0/oauth/access_token\
 &fb_exchange_token=PAGE_TOKEN_FROM_ABOVE"
 ```
 
-App Secret נמצא ב: developers.facebook.com → lochesh-plants-bot → App settings → Basic
+App Secret: developers.facebook.com → lochesh-plants-bot → App settings → Basic
+
+**כל 60 יום:** מחדשים ומעדכנים את `META_PAGE_ACCESS_TOKEN` בריילוויי → Deploy.
 
 ---
 
-## שלב 3: Deploy על Render
+## Instagram — App Review
 
-1. העלה את תיקיית `telegram-bot/` ל-GitHub
-2. פתח https://render.com → "New" → **"Background Worker"** (לא Web Service)
-3. חבר ל-GitHub repo שהעלת
-4. Render יזהה את `render.yaml` אוטומטית
-5. **הגדר Environment Variables** (Settings → Environment):
-
-| שם משתנה | ערך |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | Token חדש מ-BotFather |
-| `TELEGRAM_CHAT_IDS` | `68081535` (או כמה, מופרדים בפסיק) |
-| `TELEGRAM_CHAT_NAMES` | אופציונלי — שמות לתצוגה באותו סדר, למשל `אבירם,דניאל` |
-| `META_PAGE_ACCESS_TOKEN` | Long-lived token מ-שלב 2 |
-| `INSTAGRAM_ACCOUNT_ID` | `753951067792932` |
-| `FACEBOOK_PAGE_ID` | `1103082102889183` |
-| `ANTHROPIC_API_KEY` | מ-console.anthropic.com |
-
-6. לחץ **"Deploy"**
-
-> ✅ Background Worker על Render **לא נרדם** — רץ 24/7 בחינם.
-
----
-
-## שלב 4: App Review לאינסטגרם (חובה לפרודקשן)
-
-כרגע הבוט עובד עם **Facebook Messenger DMs** בלבד.  
-לגישה ל-**Instagram DMs** — Meta דורשת App Review:
+כרגע הבוט סורק **Facebook Messenger** בלבד. לגישה ל-Instagram DMs צריך אישור של Meta:
 
 1. developers.facebook.com → lochesh-plants-bot → App Review → Requests
-2. בקש: `instagram_manage_messages`
-3. המתן לאישור Meta (בדרך כלל 1-5 ימי עסקים)
-4. לאחר אישור — הבוט יסרוק גם Instagram DMs
-
-> בינתיים, הבוט סורק רק **Facebook Messenger** (דניאל הלוחש לצמחים).  
-> דניאל מקבל כ-3 Facebook Messenger DMs לפי מה שרואים ב-Business Suite.
-
----
-
-## בדיקה ראשונה
-
-לאחר Deploy:
-1. שלח `/scan` לבוט בטלגרם
-2. אם יש DMs שלא נענו — הם יגיעו מיד
-3. נסה ללחוץ "שלח" על אחד מהם ובדוק שהגיע
+2. בקש `instagram_manage_messages`
+3. אישור לוקח בדרך כלל 1-5 ימי עסקים
 
 ---
 
@@ -120,60 +127,51 @@ App Secret נמצא ב: developers.facebook.com → lochesh-plants-bot → App s
 הפיקוס שלי מפיל עלים מה עושים?
 ─────────────────
 💬 תשובה מוצעת:
-פיקוס שמפיל עלים זה לרוב שינוי מקום או רוח. אם הזזת אותו לאחרונה — החזר. אם לא — בדוק שאין מזגן ישיר עליו.
+פיקוס שמפיל עלים זה לרוב שינוי מקום או רוח. אם הזזת אותו לאחרונה — החזר.
 
 [✅ שלח] [✏️ ערוך ושלח] [⏭️ דלג]
+[🔄 נסח מחדש]
 ```
 
-**לחץ שלח** — התשובה נשלחת ישירות ל-Facebook Messenger  
-**לחץ ערוך** — הבוט מבקש ממך תשובה חדשה  
-**לחץ דלג** — מסמן כדולג ועובר הלאה
+**שלח** — נשלח ישירות ללקוח | **ערוך** — כותבים תשובה משלכם ונשלחת
+**דלג** — מסמן כדולג | **נסח מחדש** — מבקש מ-Claude ניסוח חלופי
 
-### פקודות ידניות:
-- `/scan` — סרוק הודעות עכשיו
-- `/status` — כמה הודעות ממתינות / נשלחו / דולגו
+### פקודות
 
----
-
-## עדכון Token אחרי 60 יום
-
-```bash
-curl "https://graph.facebook.com/v19.0/oauth/access_token?grant_type=fb_exchange_token&client_id=1390706479789623&client_secret=APP_SECRET&fb_exchange_token=TOKEN_הישן"
-```
-
-עדכן ב-Render → Environment → `META_PAGE_ACCESS_TOKEN` → Deploy אוטומטי.
+| פקודה | מה היא עושה |
+|---|---|
+| `/scan` | תפריט סריקה ידנית (מאז אחרונה / 24ש' / שבוע / חודש / 90 יום) |
+| `/status` | כמה ממתינות, נשלחו, דולגו |
+| `/digest` | דוח שבועי עכשיו — שאלות נפוצות + רעיונות לסרטונים |
+| `/learn` | מציג איפה ערכת את הצעות הבוט — חומר לשיפור הפרומפט |
+| `/reset` | מאפס את חלון הסריקה |
+| `/clear_db` | מוחק את טבלת ההודעות (זהירות) |
 
 ---
 
 ## בעיות נפוצות
 
-**הבוט לא מגיב בטלגרם:**
-- בדוק שה-TELEGRAM_BOT_TOKEN נכון ב-Render
-- בדוק לוגים: Render Dashboard → Logs
+**הבוט לא מגיב בטלגרם**
+בדוק `TELEGRAM_BOT_TOKEN` ואת הלוגים: Railway → Deployments → View logs.
 
-**לא מוצא הודעות:**
-- ודא שה-IDs נכונים (ראה טבלה למעלה)
-- Token עלול להיות פג — חדש אותו
+**נמען חדש לא מקבל כלום**
+הוא לא לחץ Start בבוט, או שה-ID שגוי. הלוגים יראו `Telegram send error to <id>`.
 
-**שגיאה "Forbidden" בשליחה:**
-- Token פג — חדש אותו
-- ודא ש-pages_messaging גרנטד על הדף
+**לא מוצא הודעות**
+ה-IDs שגויים, או שה-Page Token פג — חדש אותו.
+
+**שגיאת "Forbidden" בשליחה**
+Token פג, או ש-`pages_messaging` לא מאושר על הדף.
+
+**השירות ירד פתאום**
+בדוק את מצב החיוב בריילוויי — בטריאל מוגבל השירות נכבה כשנגמר הקרדיט.
 
 ---
 
-## הוספת נמען נוסף לבוט (למשל דניאל + אבירם)
+## נקודות תחזוקה פתוחות
 
-הבוט תומך בכמה נמענים. כל אחד מקבל את אותן הצעות תשובה, וכל אחד יכול לשלוח/לערוך/לדלג.
-כשאחד מגיב — ההעתק אצל השני מתעדכן ("✅ נשלח (על ידי אבירם)") והכפתורים נעלמים.
-
-**איך מוסיפים:**
-
-1. הנמען החדש פותח טלגרם, מחפש את הבוט ולוחץ **Start** (חובה — בלי זה טלגרם חוסם שליחה אליו).
-2. הוא מחפש **@userinfobot**, לוחץ Start, ומקבל את ה-ID המספרי שלו.
-3. ב-Render → השירות → **Environment**:
-   - `TELEGRAM_CHAT_IDS` = `68081535,<ID של דניאל>`
-   - `TELEGRAM_CHAT_NAMES` = `אבירם,דניאל` (אותו סדר)
-4. **Save** — Render מפעיל מחדש אוטומטית.
-5. בדיקה: שלח `/status` מהחשבון החדש. אם יש תשובה — הוא מחובר.
-
-**להסרת נמען:** מוחקים את ה-ID מהרשימה ושומרים.
+- **Railway בטריאל מוגבל** — ב-21.7.2026 נותרו 29 יום / $4.95. כשייגמר הבוט יורד.
+- **הטוקן של הבוט מופיע בלוגים** — ספריית טלגרם מדפיסה URL מלא של כל קריאת API,
+  והטוקן הוא חלק מה-URL. כל מי שיש לו גישה ללוגים רואה אותו.
+- **רשימת "נושאים עם סרטונים" בפרומפט** (`main.py`) — לרענן פעם בחודש
+  מתוך `brain/09_יומן_סרטונים.md`.
