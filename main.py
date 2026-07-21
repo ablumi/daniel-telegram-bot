@@ -36,13 +36,34 @@ logger = logging.getLogger(__name__)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN       = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID     = int(os.environ["TELEGRAM_CHAT_ID"])   # ה-chat ID של דניאל
+
+# נמענים: TELEGRAM_CHAT_IDS="123,456" (אבירם, דניאל).
+# תאימות לאחור — אם מוגדר רק TELEGRAM_CHAT_ID הישן, משתמשים בו.
+_raw_ids = os.environ.get("TELEGRAM_CHAT_IDS") or os.environ.get("TELEGRAM_CHAT_ID", "")
+CHAT_IDS = [int(x.strip()) for x in _raw_ids.split(",") if x.strip()]
+if not CHAT_IDS:
+    raise RuntimeError("חסר TELEGRAM_CHAT_IDS (או TELEGRAM_CHAT_ID) בסביבה")
+AUTHORIZED_IDS = set(CHAT_IDS)
+TELEGRAM_CHAT_ID = CHAT_IDS[0]   # הנמען הראשי — להודעות מערכת חד-פעמיות
+
+# שמות תצוגה לנמענים: TELEGRAM_CHAT_NAMES="אבירם,דניאל" (אופציונלי, לפי הסדר)
+_raw_names = os.environ.get("TELEGRAM_CHAT_NAMES", "")
+CHAT_NAMES = {
+    cid: name.strip()
+    for cid, name in zip(CHAT_IDS, _raw_names.split(","))
+    if name.strip()
+}
+
 META_PAGE_TOKEN      = os.environ["META_PAGE_ACCESS_TOKEN"]
 ANTHROPIC_API_KEY    = os.environ["ANTHROPIC_API_KEY"]
 INSTAGRAM_ACCOUNT_ID = os.environ.get("INSTAGRAM_ACCOUNT_ID", "")
 FACEBOOK_PAGE_ID     = os.environ.get("FACEBOOK_PAGE_ID", "")
 DB_PATH              = os.environ.get("DB_PATH", "messages.db")
 SCAN_HOURS           = int(os.environ.get("SCAN_HOURS", "12"))
+
+def display_name(user) -> str:
+    """שם לתצוגה של מי שביצע פעולה."""
+    return CHAT_NAMES.get(user.id) or user.first_name or str(user.id)
 
 # Async — הקריאה ל-Claude לא חוסמת את הבוט (הכפתורים בטלגרם נשארים מגיבים בזמן סריקה)
 anthropic = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
@@ -170,6 +191,15 @@ def init_db():
         CREATE TABLE IF NOT EXISTS state (
             key   TEXT PRIMARY KEY,
             value TEXT
+        )
+    """)
+    # העתק של כל הודעה אצל כל נמען — כדי לעדכן את כולם כשאחד מגיב
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS deliveries (
+            message_id      INTEGER NOT NULL,
+            chat_id         INTEGER NOT NULL,
+            telegram_msg_id INTEGER NOT NULL,
+            PRIMARY KEY (message_id, chat_id)
         )
     """)
     # ברירת מחדל: סריקה מ-24 שעות אחורה בהתחלה
@@ -578,6 +608,44 @@ def build_keyboard(msg_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔄 נסח מחדש", callback_data=f"regen:{msg_id}")],
     ])
 
+# ─── Broadcast ────────────────────────────────────────────────────────────────
+async def broadcast(bot, text: str, **kwargs) -> list[tuple[int, int]]:
+    """שולח הודעה לכל הנמענים. מחזיר [(chat_id, telegram_msg_id), ...]."""
+    sent = []
+    for cid in CHAT_IDS:
+        try:
+            m = await bot.send_message(chat_id=cid, text=text, **kwargs)
+            sent.append((cid, m.message_id))
+        except Exception as e:
+            logger.error(f"Telegram send error to {cid}: {type(e).__name__}: {e}")
+    return sent
+
+def record_deliveries(conn, db_id: int, sent: list[tuple[int, int]]):
+    conn.executemany(
+        "INSERT OR REPLACE INTO deliveries (message_id, chat_id, telegram_msg_id) VALUES (?,?,?)",
+        [(db_id, cid, mid) for cid, mid in sent]
+    )
+    conn.commit()
+
+async def sync_others(bot, db_id: int, text: str, except_chat_id: int,
+                      keyboard: InlineKeyboardMarkup | None = None):
+    """מעדכן את ההעתקים אצל שאר הנמענים (בלי מי שביצע את הפעולה)."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT chat_id, telegram_msg_id FROM deliveries WHERE message_id=? AND chat_id!=?",
+        (db_id, except_chat_id)
+    ).fetchall()
+    conn.close()
+    for r in rows:
+        try:
+            await bot.edit_message_text(
+                chat_id=r["chat_id"], message_id=r["telegram_msg_id"],
+                text=text, parse_mode="HTML", reply_markup=keyboard
+            )
+        except Exception as e:
+            # "message is not modified" ודומיו — לא קריטי
+            logger.info(f"sync_others skip {r['chat_id']}: {type(e).__name__}")
+
 # ─── Scanner ──────────────────────────────────────────────────────────────────
 async def scan_and_notify(bot, since_override: datetime | None = None):
     """הסריקה הראשית — מושכת DMs חדשים ושולחת לטלגרם."""
@@ -687,21 +755,20 @@ async def scan_and_notify(bot, since_override: datetime | None = None):
             "all_messages": all_texts,
             "suggested_reply": suggested,
         }
-        try:
-            tg_msg = await bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=build_telegram_text(display_msg),
-                parse_mode="HTML",
-                reply_markup=build_keyboard(db_id),
-            )
+        sent = await broadcast(
+            bot,
+            build_telegram_text(display_msg),
+            parse_mode="HTML",
+            reply_markup=build_keyboard(db_id),
+        )
+        if sent:
+            record_deliveries(conn, db_id, sent)
             conn.execute(
                 "UPDATE messages SET telegram_msg_id=? WHERE id=?",
-                (tg_msg.message_id, db_id)
+                (sent[0][1], db_id)
             )
             conn.commit()
             new_count += 1
-        except Exception as e:
-            logger.error(f"Telegram send error: {type(e).__name__}: {e}")
 
     conn.close()
 
@@ -709,13 +776,10 @@ async def scan_and_notify(bot, since_override: datetime | None = None):
     if liked_names:
         names_str = ", ".join(liked_names[:15])
         suffix = f" ועוד {len(liked_names)-15}" if len(liked_names) > 15 else ""
-        try:
-            await bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=f"❤️ לייק אוטומטי נשלח ל-{len(liked_names)} הודעות תודה:\n{names_str}{suffix}"
-            )
-        except Exception as e:
-            logger.error(f"Telegram liked summary error: {type(e).__name__}")
+        await broadcast(
+            bot,
+            f"❤️ לייק אוטומטי נשלח ל-{len(liked_names)} הודעות תודה:\n{names_str}{suffix}"
+        )
 
     # מקדם last_scan רק אם ה-API הצליח — כדי לא לדלג על הודעות בזמן תקלות
     if success:
@@ -740,10 +804,7 @@ async def send_weekly_digest(bot):
 
     texts = [r["message_text"] for r in rows if r["message_text"] and r["message_text"].strip()]
     if len(texts) < 3:
-        await bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
-            text="📋 דוח שבועי: פחות מ-3 הודעות השבוע — אין מספיק נתונים לסיכום."
-        )
+        await broadcast(bot, "📋 דוח שבועי: פחות מ-3 הודעות השבוע — אין מספיק נתונים לסיכום.")
         return
 
     joined = "\n".join(f"- {t[:200]}" for t in texts)
@@ -768,13 +829,13 @@ async def send_weekly_digest(bot):
         summary = ""
 
     if not summary:
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="❌ שגיאה ביצירת הדוח השבועי")
+        await broadcast(bot, "❌ שגיאה ביצירת הדוח השבועי")
         return
 
     # בלי parse_mode — הטקסט מבוסס על הודעות משתמשים
-    await bot.send_message(
-        chat_id=TELEGRAM_CHAT_ID,
-        text=f"📋 דוח שבועי — {len(texts)} הודעות ב-7 הימים האחרונים\n\n{summary}"
+    await broadcast(
+        bot,
+        f"📋 דוח שבועי — {len(texts)} הודעות ב-7 הימים האחרונים\n\n{summary}"
     )
 
 # ─── Telegram handlers ────────────────────────────────────────────────────────
@@ -782,9 +843,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # רק דניאל יכול להשתמש
-    if query.from_user.id != TELEGRAM_CHAT_ID:
+    # רק נמענים מורשים
+    if query.from_user.id not in AUTHORIZED_IDS:
         return
+
+    actor = display_name(query.from_user)
+    # מציינים מי טיפל רק כששניים או יותר מחוברים
+    by = f" (על ידי {html.escape(actor)})" if len(CHAT_IDS) > 1 else ""
 
     action, msg_id = query.data.split(":")
     msg_id = int(msg_id)
@@ -810,9 +875,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return  # כבר טופלה
 
         success = await send_meta_message(row["sender_id"], row["suggested_reply"], row["platform"])
-        status_line = "✅ נשלח!" if success else "❌ שגיאה בשליחה"
+        status_line = f"✅ נשלח!{by}" if success else f"❌ שגיאה בשליחה{by}"
         new_text = build_telegram_text(dict(row)) + f"\n\n{status_line}"
         await query.edit_message_text(new_text, parse_mode="HTML")
+        await sync_others(context.bot, msg_id, new_text, query.from_user.id)
         conn = get_db()
         conn.execute("UPDATE messages SET status=? WHERE id=?",
                      ("sent" if success else "error", msg_id))
@@ -825,6 +891,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=query.message.chat_id,
             text="✏️ כתוב את התשובה שאתה רוצה לשלוח:"
         )
+        # מיידעים את השני שמישהו עורך — אבל משאירים לו כפתורים,
+        # למקרה שהעורך יתחרט. שליחה כפולה נמנעת ממילא ע"י נעילת ה-status.
+        if by:
+            await sync_others(
+                context.bot, msg_id,
+                build_telegram_text(dict(row)) + f"\n\n✏️ {html.escape(actor)} עורך תשובה...",
+                query.from_user.id, build_keyboard(msg_id)
+            )
 
     elif action == "regen":
         # נסח מחדש — מבקש מ-Claude ניסוח חלופי ומעדכן את ההודעה בטלגרם
@@ -847,14 +921,18 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display = dict(row)
         display["suggested_reply"] = new_reply
         display["all_messages"] = texts
+        regen_text = build_telegram_text(display)
         await query.edit_message_text(
-            build_telegram_text(display), parse_mode="HTML",
+            regen_text, parse_mode="HTML",
             reply_markup=build_keyboard(msg_id)
         )
+        await sync_others(context.bot, msg_id, regen_text, query.from_user.id,
+                          build_keyboard(msg_id))
 
     elif action == "skip":
-        new_text = build_telegram_text(dict(row)) + "\n\n⏭️ דולג"
+        new_text = build_telegram_text(dict(row)) + f"\n\n⏭️ דולג{by}"
         await query.edit_message_text(new_text, parse_mode="HTML")
+        await sync_others(context.bot, msg_id, new_text, query.from_user.id)
         conn = get_db()
         conn.execute("UPDATE messages SET status='skipped' WHERE id=?", (msg_id,))
         conn.commit()
@@ -862,8 +940,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """מקבל טקסט כשדניאל עורך תשובה."""
-    if update.effective_user.id != TELEGRAM_CHAT_ID:
+    """מקבל טקסט כשדניאל (או אבירם) עורך תשובה."""
+    if update.effective_user.id not in AUTHORIZED_IDS:
         return
 
     editing_id = context.user_data.pop("editing_id", None)
@@ -879,6 +957,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ לא מצאתי את ההודעה")
         return
 
+    # אם הנמען השני כבר טיפל בהודעה בזמן שכתבת — לא שולחים פעמיים
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE messages SET status='sending' WHERE id=? AND status='pending'",
+        (editing_id,)
+    )
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        await update.message.reply_text("⚠️ ההודעה כבר טופלה — לא נשלח שוב")
+        return
+
     success = await send_meta_message(row["sender_id"], new_reply, row["platform"])
     if success:
         await update.message.reply_text("✅ נשלח!")
@@ -891,14 +981,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         conn.commit()
         conn.close()
+        # מעדכן את כל ההעתקים (כולל של העורך) — התשובה שנשלחה בפועל, בלי כפתורים
+        actor = display_name(update.effective_user)
+        by = f" (על ידי {html.escape(actor)})" if len(CHAT_IDS) > 1 else ""
+        display = dict(row)
+        display["suggested_reply"] = new_reply
+        await sync_others(
+            context.bot, editing_id,
+            build_telegram_text(display) + f"\n\n✅ נשלח (נערך){by}",
+            except_chat_id=0
+        )
     else:
         await update.message.reply_text("❌ שגיאה בשליחה — נסה שוב")
+        conn = get_db()
+        conn.execute("UPDATE messages SET status='pending' WHERE id=?", (editing_id,))
+        conn.commit()
+        conn.close()
         context.user_data["editing_id"] = editing_id  # נסה שוב
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודה /scan — מציגה תפריט סריקה."""
-    if update.effective_user.id != TELEGRAM_CHAT_ID:
+    if update.effective_user.id not in AUTHORIZED_IDS:
         return
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("⏱️ מאז הסריקה האחרונה", callback_data="scan:auto")],
@@ -921,7 +1025,7 @@ async def handle_scan_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
 
-    if query.from_user.id != TELEGRAM_CHAT_ID:
+    if query.from_user.id not in AUTHORIZED_IDS:
         return
 
     choice = query.data.split(":")[1]
@@ -934,12 +1038,12 @@ async def handle_scan_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await query.edit_message_text(f"🔍 סורק — {labels.get(choice, choice)}...")
     await scan_and_notify(context.bot, since_override=since)
-    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ סריקה הושלמה")
+    await broadcast(context.bot, "✅ סריקה הושלמה")
 
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודה /reset [ימים] — מאפס את חלון הסריקה N ימים אחורה (ברירת מחדל: 30)."""
-    if update.effective_user.id != TELEGRAM_CHAT_ID:
+    if update.effective_user.id not in AUTHORIZED_IDS:
         return
     days = 30
     if context.args:
@@ -959,7 +1063,7 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_clear_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודה /clear_db — מוחק את כל ההודעות השמורות במסד הנתונים ומאפס את הסריקה."""
-    if update.effective_user.id != TELEGRAM_CHAT_ID:
+    if update.effective_user.id not in AUTHORIZED_IDS:
         return
     conn = get_db()
     count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
@@ -982,7 +1086,7 @@ async def cmd_clear_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודה /status — מציגה סטטיסטיקה."""
-    if update.effective_user.id != TELEGRAM_CHAT_ID:
+    if update.effective_user.id not in AUTHORIZED_IDS:
         return
     conn = get_db()
     pending = conn.execute("SELECT COUNT(*) FROM messages WHERE status='pending'").fetchone()[0]
@@ -1011,7 +1115,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודה /learn — מציגה את התיקונים האחרונים של דניאל (הבוט הציע ≠ דניאל שלח).
     זה חומר הלמידה לריענון בנק הדוגמאות בפרומפט."""
-    if update.effective_user.id != TELEGRAM_CHAT_ID:
+    if update.effective_user.id not in AUTHORIZED_IDS:
         return
     conn = get_db()
     rows = conn.execute(
@@ -1048,7 +1152,7 @@ async def cmd_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודה /digest — מפיק דוח שבועי מיידי."""
-    if update.effective_user.id != TELEGRAM_CHAT_ID:
+    if update.effective_user.id not in AUTHORIZED_IDS:
         return
     await update.message.reply_text("📋 מכין דוח שבועי...")
     await send_weekly_digest(context.bot)

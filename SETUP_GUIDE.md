@@ -13,7 +13,7 @@
 | `INSTAGRAM_ACCOUNT_ID` | `753951067792932` |
 | Business ID | `3949184355323776` |
 | Meta App ID | `1390706479789623` |
-| `TELEGRAM_CHAT_ID` | `8997252631` (Daniel's Telegram ID) |
+| `TELEGRAM_CHAT_IDS` | `8997252631` (Daniel) — מוסיפים נמענים נוספים בפסיק |
 
 ---
 
@@ -75,7 +75,8 @@ App Secret נמצא ב: developers.facebook.com → lochesh-plants-bot → App s
 | שם משתנה | ערך |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Token חדש מ-BotFather |
-| `TELEGRAM_CHAT_ID` | `8997252631` |
+| `TELEGRAM_CHAT_IDS` | `8997252631` (או כמה, מופרדים בפסיק) |
+| `TELEGRAM_CHAT_NAMES` | אופציונלי — שמות לתצוגה באותו סדר, למשל `דניאל,אבירם` |
 | `META_PAGE_ACCESS_TOKEN` | Long-lived token מ-שלב 2 |
 | `INSTAGRAM_ACCOUNT_ID` | `753951067792932` |
 | `FACEBOOK_PAGE_ID` | `1103082102889183` |
@@ -157,3 +158,22 @@ curl "https://graph.facebook.com/v19.0/oauth/access_token?grant_type=fb_exchange
 **שגיאה "Forbidden" בשליחה:**
 - Token פג — חדש אותו
 - ודא ש-pages_messaging גרנטד על הדף
+
+---
+
+## הוספת נמען נוסף לבוט (למשל דניאל + אבירם)
+
+הבוט תומך בכמה נמענים. כל אחד מקבל את אותן הצעות תשובה, וכל אחד יכול לשלוח/לערוך/לדלג.
+כשאחד מגיב — ההעתק אצל השני מתעדכן ("✅ נשלח (על ידי דניאל)") והכפתורים נעלמים.
+
+**איך מוסיפים:**
+
+1. הנמען החדש פותח טלגרם, מחפש את הבוט ולוחץ **Start** (חובה — בלי זה טלגרם חוסם שליחה אליו).
+2. הוא מחפש **@userinfobot**, לוחץ Start, ומקבל את ה-ID המספרי שלו.
+3. ב-Render → השירות → **Environment**:
+   - `TELEGRAM_CHAT_IDS` = `8997252631,<ID החדש>`
+   - `TELEGRAM_CHAT_NAMES` = `דניאל,אבירם` (אותו סדר)
+4. **Save** — Render מפעיל מחדש אוטומטית.
+5. בדיקה: שלח `/status` מהחשבון החדש. אם יש תשובה — הוא מחובר.
+
+**להסרת נמען:** מוחקים את ה-ID מהרשימה ושומרים.

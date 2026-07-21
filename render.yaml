@@ -12,7 +12,9 @@ services:
         value: /data/messages.db
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: TELEGRAM_CHAT_ID
+      - key: TELEGRAM_CHAT_IDS
+        sync: false
+      - key: TELEGRAM_CHAT_NAMES
         sync: false
       - key: META_PAGE_ACCESS_TOKEN
         sync: false
