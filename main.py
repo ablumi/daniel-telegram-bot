@@ -7,6 +7,7 @@
 
 import asyncio
 import html
+import json
 import logging
 import os
 import re
@@ -460,7 +461,36 @@ def should_skip_message(text: str) -> tuple[bool, str]:
     return False, ''
 
 # ─── Meta API — send ──────────────────────────────────────────────────────────
-async def send_meta_message(sender_id: str, text: str, platform: str) -> bool:
+def explain_meta_error(status: int, body: str) -> str:
+    """מתרגם שגיאת Meta להסבר קצר בעברית — מה באמת קרה ומה עושים."""
+    try:
+        err = json.loads(body).get("error", {})
+    except Exception:
+        err = {}
+    msg  = err.get("message", "") or body[:200]
+    code = err.get("code")
+    sub  = err.get("error_subcode")
+
+    low = msg.lower()
+    if "not admins, developers or testers" in low or "pages_messaging" in low:
+        hint = "האפליקציה במצב פיתוח — אפשר להתכתב רק עם אדמין/מפתח/טסטר. צריך אישור pages_messaging ב-App Review"
+    elif "outside of allowed window" in low or "24" in low and "window" in low:
+        hint = "עברו 24 שעות מההודעה של הלקוח — חלון המענה נסגר"
+    elif code == 190 or "access token" in low:
+        hint = "הטוקן פג או בוטל — צריך לחדש את META_PAGE_ACCESS_TOKEN"
+    elif code == 10 or code == 200:
+        hint = "חסרה הרשאה על הדף"
+    elif code == 613 or "rate limit" in low:
+        hint = "חריגה ממכסת הקריאות — לנסות שוב מאוחר יותר"
+    else:
+        hint = msg[:150] or f"HTTP {status}"
+
+    detail = f"code={code}" + (f"/{sub}" if sub else "")
+    return f"{hint} ({detail})" if code else hint
+
+
+async def send_meta_message(sender_id: str, text: str, platform: str) -> tuple[bool, str]:
+    """שולח הודעה ללקוח. מחזיר (הצליח, סיבת הכישלון בעברית)."""
     url = "https://graph.facebook.com/v19.0/me/messages"
     payload = {
         "recipient": {"id": sender_id},
@@ -471,10 +501,16 @@ async def send_meta_message(sender_id: str, text: str, platform: str) -> bool:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(url, json=payload, headers=headers)
-            return resp.status_code == 200
+            if resp.status_code == 200:
+                return True, ""
+            reason = explain_meta_error(resp.status_code, resp.text)
+            logger.error(
+                f"Meta send failed [{platform}] HTTP {resp.status_code}: {resp.text[:400]}"
+            )
+            return False, reason
     except Exception as e:
-        logger.error(f"Meta send error: {type(e).__name__}")
-        return False
+        logger.error(f"Meta send error: {type(e).__name__}: {e}")
+        return False, f"שגיאת רשת ({type(e).__name__})"
 
 # ─── Thank-you detection ─────────────────────────────────────────────────────
 _THANKS_WORDS = [
@@ -564,10 +600,13 @@ async def send_meta_like(message_id: str, sender_id: str, platform: str) -> bool
                 )
             if resp.status_code == 200:
                 return True
-            logger.warning(f"Like API {resp.status_code}: {resp.text[:120]}")
+            logger.warning(
+                f"Like failed [{platform}] HTTP {resp.status_code}: "
+                f"{explain_meta_error(resp.status_code, resp.text)} | {resp.text[:300]}"
+            )
             return False
     except Exception as e:
-        logger.error(f"Meta like error: {type(e).__name__}")
+        logger.error(f"Meta like error: {type(e).__name__}: {e}")
         return False
 
 
@@ -874,8 +913,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if cur.rowcount == 0:
             return  # כבר טופלה
 
-        success = await send_meta_message(row["sender_id"], row["suggested_reply"], row["platform"])
-        status_line = f"✅ נשלח!{by}" if success else f"❌ שגיאה בשליחה{by}"
+        success, reason = await send_meta_message(
+            row["sender_id"], row["suggested_reply"], row["platform"]
+        )
+        status_line = (
+            f"✅ נשלח!{by}" if success
+            else f"❌ שגיאה בשליחה{by}\n<i>{html.escape(reason)}</i>"
+        )
         new_text = build_telegram_text(dict(row)) + f"\n\n{status_line}"
         await query.edit_message_text(new_text, parse_mode="HTML")
         await sync_others(context.bot, msg_id, new_text, query.from_user.id)
@@ -969,7 +1013,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ ההודעה כבר טופלה — לא נשלח שוב")
         return
 
-    success = await send_meta_message(row["sender_id"], new_reply, row["platform"])
+    success, reason = await send_meta_message(row["sender_id"], new_reply, row["platform"])
     if success:
         await update.message.reply_text("✅ נשלח!")
         conn = get_db()
@@ -992,7 +1036,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except_chat_id=0
         )
     else:
-        await update.message.reply_text("❌ שגיאה בשליחה — נסה שוב")
+        await update.message.reply_text(f"❌ שגיאה בשליחה — {reason}\nנסה שוב")
         conn = get_db()
         conn.execute("UPDATE messages SET status='pending' WHERE id=?", (editing_id,))
         conn.commit()
