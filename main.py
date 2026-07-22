@@ -61,6 +61,8 @@ INSTAGRAM_ACCOUNT_ID = os.environ.get("INSTAGRAM_ACCOUNT_ID", "")
 FACEBOOK_PAGE_ID     = os.environ.get("FACEBOOK_PAGE_ID", "")
 DB_PATH              = os.environ.get("DB_PATH", "messages.db")
 SCAN_HOURS           = int(os.environ.get("SCAN_HOURS", "12"))
+# סריקה אוטומטית (9:00/21:00) + דוח שבועי. כבה עם AUTO_SCAN=false בזמן שאי אפשר לענות ללקוחות.
+AUTO_SCAN            = os.environ.get("AUTO_SCAN", "true").strip().lower() not in ("false", "0", "no", "off")
 
 def display_name(user) -> str:
     """שם לתצוגה של מי שביצע פעולה."""
@@ -1219,24 +1221,27 @@ async def main():
     app.add_handler(CommandHandler("learn", cmd_learn))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # Scheduler לסריקה אוטומטית
+    # Scheduler לסריקה אוטומטית — רק אם AUTO_SCAN פעיל
     scheduler = AsyncIOScheduler(timezone="Asia/Jerusalem")
-    scheduler.add_job(
-        scan_and_notify,
-        "cron",
-        hour="9,21",   # 9 בבוקר ו-9 בערב
-        kwargs={"bot": app.bot},
-    )
-    # דוח שבועי — יום ראשון 09:30
-    scheduler.add_job(
-        send_weekly_digest,
-        "cron",
-        day_of_week="sun",
-        hour=9, minute=30,
-        kwargs={"bot": app.bot},
-    )
-    scheduler.start()
-    logger.info(f"Scheduler started — scans 09:00/21:00, weekly digest Sun 09:30 Israel time")
+    if AUTO_SCAN:
+        scheduler.add_job(
+            scan_and_notify,
+            "cron",
+            hour="9,21",   # 9 בבוקר ו-9 בערב
+            kwargs={"bot": app.bot},
+        )
+        # דוח שבועי — יום ראשון 09:30
+        scheduler.add_job(
+            send_weekly_digest,
+            "cron",
+            day_of_week="sun",
+            hour=9, minute=30,
+            kwargs={"bot": app.bot},
+        )
+        scheduler.start()
+        logger.info("Scheduler started — scans 09:00/21:00, weekly digest Sun 09:30 Israel time")
+    else:
+        logger.warning("AUTO_SCAN is off — automatic scans & weekly digest disabled. /scan still works manually.")
 
     # הפעל את הבוט עם polling
     async with app:
